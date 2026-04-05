@@ -31,6 +31,9 @@
 	"files": [
 		"src/rummy.repo.js",
 		"src/CtagsExtractor.js",
+		"src/FileScanner.js",
+		"src/ProjectContext.js",
+		"src/GitProvider.js",
 		"src/formatSymbols.js"
 	],
 	"publishConfig": {
@@ -45,7 +48,9 @@
 		"@biomejs/biome": "^2.4.6"
 	},
 	"dependencies": {
-		"@possumtech/antlrmap": "^0.0.8",
+		"@possumtech/antlrmap": "^0.0.8"
+	},
+	"optionalDependencies": {
 		"isomorphic-git": "^1.37.4"
 	}
 }

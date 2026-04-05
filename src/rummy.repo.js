@@ -7,7 +7,7 @@ import ProjectContext from "./ProjectContext.js";
 
 const antlrmapSupported = new Set(Object.keys(Antlrmap.extensions));
 
-export default class Repo {
+export default class RummyRepo {
 	#core;
 	#scanner = null;
 

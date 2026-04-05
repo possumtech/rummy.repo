@@ -1,15 +1,23 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { describe, it } from "node:test";
+import { afterEach, beforeEach, describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
-import RepoMapPlugin from "./rummy.repo.js";
+import RummyRepo from "./rummy.repo.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
-function mockCore() {
+function mockCore(dbOverride = null) {
 	const listeners = new Map();
 	return {
+		db: dbOverride,
+		hooks: {
+			hedberg: { match: (pattern, str) => pattern === str },
+			entry: {
+				changed: { async emit() {} },
+			},
+		},
 		on(event, fn) {
 			if (!listeners.has(event)) listeners.set(event, []);
 			listeners.get(event).push(fn);
@@ -24,7 +32,11 @@ function mockCore() {
 function mockRummy(bodies = {}, projectRoot = __dirname) {
 	const attributes = {};
 	return {
-		project: { project_root: projectRoot },
+		project: { project_root: projectRoot, id: 1 },
+		noContext: false,
+		sequence: 1,
+		entries: mockKnownStore(),
+		db: mockDb(),
 		async getBody(path) {
 			return bodies[path] ?? null;
 		},
@@ -35,10 +47,44 @@ function mockRummy(bodies = {}, projectRoot = __dirname) {
 	};
 }
 
-describe("RepoMapPlugin", () => {
+function mockKnownStore() {
+	const entries = new Map();
+	return {
+		async upsert(runId, _turn, path, content, state, opts = {}) {
+			entries.set(`${runId}:${path}`, {
+				path,
+				body: content,
+				state,
+				hash: opts.hash,
+				attributes: opts.attributes,
+				updated_at: opts.updatedAt,
+			});
+		},
+		async getFileEntries() {
+			return [];
+		},
+		async getBody(runId, path) {
+			return entries.get(`${runId}:${path}`)?.body ?? null;
+		},
+		async remove(runId, path) {
+			entries.delete(`${runId}:${path}`);
+		},
+		entries,
+	};
+}
+
+function mockDb() {
+	return {
+		get_active_runs: { all: async () => [{ id: 1 }] },
+		get_file_constraints: { all: async () => [] },
+		get_entry_state: { get: async () => null },
+	};
+}
+
+describe("RummyRepo", () => {
 	it("registers entry.changed listener on construction", () => {
 		const core = mockCore();
-		new RepoMapPlugin(core);
+		new RummyRepo(core);
 		assert.ok(
 			core.emit("entry.changed", {
 				rummy: mockRummy(),
@@ -54,7 +100,7 @@ describe("RepoMapPlugin", () => {
 		const body = readFileSync(join(__dirname, "formatSymbols.js"), "utf8");
 		const rummy = mockRummy({ "formatSymbols.js": body });
 
-		new RepoMapPlugin(core);
+		new RummyRepo(core);
 		await core.emit("entry.changed", {
 			rummy,
 			runId: 1,
@@ -72,7 +118,7 @@ describe("RepoMapPlugin", () => {
 		const core = mockCore();
 		const rummy = mockRummy({});
 
-		new RepoMapPlugin(core);
+		new RummyRepo(core);
 		await core.emit("entry.changed", {
 			rummy,
 			runId: 1,
@@ -87,7 +133,7 @@ describe("RepoMapPlugin", () => {
 		const core = mockCore();
 		const rummy = mockRummy({});
 
-		new RepoMapPlugin(core);
+		new RummyRepo(core);
 		await core.emit("entry.changed", {
 			rummy,
 			runId: 1,
@@ -102,7 +148,7 @@ describe("RepoMapPlugin", () => {
 		const core = mockCore();
 		const rummy = mockRummy({});
 
-		new RepoMapPlugin(core);
+		new RummyRepo(core);
 		await core.emit("entry.changed", {
 			rummy,
 			runId: 1,
@@ -126,7 +172,7 @@ describe("RepoMapPlugin", () => {
 			"CtagsExtractor.js": ctagsBody,
 		});
 
-		new RepoMapPlugin(core);
+		new RummyRepo(core);
 		await core.emit("entry.changed", {
 			rummy,
 			runId: 1,
@@ -142,7 +188,7 @@ describe("RepoMapPlugin", () => {
 		const core = mockCore();
 		const rummy = mockRummy({ "empty.js": "" });
 
-		new RepoMapPlugin(core);
+		new RummyRepo(core);
 		await core.emit("entry.changed", {
 			rummy,
 			runId: 1,
@@ -152,5 +198,72 @@ describe("RepoMapPlugin", () => {
 
 		// Empty content — antlrmap returns nothing, falls to ctags, ctags not installed
 		assert.equal(rummy.attributes["empty.js"], undefined);
+	});
+
+	it("registers turn.started listener on construction", () => {
+		const core = mockCore();
+		new RummyRepo(core);
+		// Should not throw when emitting with noContext
+		assert.ok(core.emit("turn.started", { rummy: { noContext: true } }));
+	});
+
+	it("skips turn.started when noContext is true", async () => {
+		const core = mockCore();
+		new RummyRepo(core);
+		// Should return without error
+		await core.emit("turn.started", { rummy: { noContext: true } });
+	});
+
+	it("skips turn.started when project has no root", async () => {
+		const core = mockCore();
+		new RummyRepo(core);
+		await core.emit("turn.started", {
+			rummy: { noContext: false, project: {} },
+		});
+	});
+
+	describe("turn.started file scanning", () => {
+		let tmpDir;
+
+		beforeEach(() => {
+			tmpDir = mkdtempSync(join(tmpdir(), "rummy-repo-turn-"));
+		});
+
+		afterEach(() => {
+			rmSync(tmpDir, { recursive: true, force: true });
+		});
+
+		it("scans project files on turn.started", async () => {
+			writeFileSync(join(tmpDir, "app.js"), "const app = true;");
+
+			// Initialize a git repo via isomorphic-git (avoids commitlint hooks)
+			const git = await import("isomorphic-git");
+			const fs = await import("node:fs");
+			await git.init({ fs, dir: tmpDir });
+			await git.add({ fs, dir: tmpDir, filepath: "app.js" });
+			await git.commit({
+				fs,
+				dir: tmpDir,
+				message: "init",
+				author: { name: "test", email: "test@test.com" },
+			});
+
+			const db = mockDb();
+			const core = mockCore(db);
+			const store = mockKnownStore();
+
+			const rummy = {
+				noContext: false,
+				project: { project_root: tmpDir, id: 1 },
+				sequence: 1,
+				entries: store,
+				db,
+			};
+
+			new RummyRepo(core);
+			await core.emit("turn.started", { rummy });
+
+			assert.ok(store.entries.size > 0);
+		});
 	});
 });

@@ -1,12 +1,21 @@
 # rummy.repo
 
-Symbol extraction plugin for [Rummy](https://github.com/possumtech/rummy). Turns source files into structured symbol maps using [antlrmap](https://github.com/possumtech/antlrmap) (formal ANTLR4 grammars) with [Universal Ctags](https://ctags.io/) as a fallback.
+File scanning and symbol extraction plugin for [Rummy](https://github.com/possumtech/rummy). Discovers project files via git, syncs them into the known store, detects changes, and extracts symbols using [antlrmap](https://github.com/possumtech/antlrmap) (formal ANTLR4 grammars) with [Universal Ctags](https://ctags.io/) as a fallback.
 
 Antlrmap relies on ANTLR4's Grammar Zoo, mapping the symbol extraction process from formal EBNF grammars. More academically rigorous than tree-sitter heuristics, more accurate than ctags regex patterns, and more amenable to obscure and domain-specific languages. Don't like it? This is why symbol extraction is a plugin -- swap it out.
 
 ## What It Does
 
-When files change in a Rummy project, this plugin reacts to `entry.changed` events, extracts symbols (functions, classes, methods, fields) from the changed files, and writes a formatted symbol tree into each file entry's `attributes.symbols`. This gives the model a compact structural overview of the codebase without reading every file in full.
+Every turn, this plugin:
+
+1. Enumerates project files from git (via isomorphic-git or CLI fallback)
+2. Stats and hashes files to detect changes since the last scan
+3. Syncs file entries into the known store (upsert changed, remove deleted)
+4. Emits `entry.changed` with the list of modified paths
+5. Reacts to `entry.changed` by extracting symbols from changed files
+6. Writes formatted symbol trees into each file entry's `attributes.symbols`
+
+The model gets a compact structural overview of the codebase -- function names, class hierarchies, method signatures, line numbers -- without reading every file in full.
 
 ## Supported Languages
 
@@ -16,25 +25,33 @@ Files with unsupported extensions fall back to Universal Ctags (if installed).
 
 ## Installation
 
-Drop into your Rummy plugins directory:
+Configure via environment variable in your `.env`:
 
-```bash
-cd ~/.rummy/plugins
-git clone https://github.com/possumtech/rummy.repo
-cd rummy.repo/main
-npm install
+```env
+RUMMY_PLUGIN_REPO=@possumtech/rummy.repo
 ```
 
-Rummy loads plugins from `~/.rummy/plugins/` on startup. No configuration required.
+Install the package:
+
+```bash
+npm install @possumtech/rummy.repo
+```
+
+Rummy loads external plugins from `RUMMY_PLUGIN_*` env vars on startup. No other configuration required.
 
 ## Usage
 
-The plugin registers automatically via the Rummy plugin contract. No manual setup needed.
+The plugin registers automatically via the Rummy v0.2 plugin contract. No manual setup needed.
 
 ```js
-import RepoMapPlugin from "@possumtech/rummy.repo";
-new RepoMapPlugin(core);
+import RummyRepo from "@possumtech/rummy.repo";
+new RummyRepo(core);
 ```
+
+## Optional Dependencies
+
+- **isomorphic-git** -- Pure JS git implementation. Used for file enumeration and HEAD detection. Falls back to CLI `git` commands if not installed.
+- **Universal Ctags** -- Fallback symbol extractor for languages not supported by antlrmap. Not required.
 
 ## Development
 
