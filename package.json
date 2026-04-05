@@ -1,6 +1,6 @@
 {
 	"name": "@possumtech/rummy.repo",
-	"version": "0.0.1",
+	"version": "0.0.3",
 	"description": "Rummy plugin for symbol extraction via antlrmap and ctags",
 	"keywords": [
 		"rummy",
@@ -29,8 +29,13 @@
 		".": "./src/rummy.repo.js"
 	},
 	"files": [
-		"src/"
+		"src/rummy.repo.js",
+		"src/CtagsExtractor.js",
+		"src/formatSymbols.js"
 	],
+	"publishConfig": {
+		"access": "public"
+	},
 	"scripts": {
 		"lint": "biome check src --fix --unsafe",
 		"test": "npm run lint && npm run test:unit",

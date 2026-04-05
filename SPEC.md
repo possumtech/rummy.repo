@@ -4,50 +4,91 @@
 
 ## 1. Plugin Contract
 
-Implements the standard Rummy plugin interface:
+Implements the Rummy v0.2 plugin interface:
 
 ```js
 export default class RepoMapPlugin {
-    static register(hooks) { ... }
+    constructor(core) {
+        core.on("entry.changed", this.#onChanged.bind(this));
+    }
 }
 ```
 
+The plugin stores no reference to `core`. All runtime state comes from
+the `rummy` context in event payloads.
+
 Loading: Rummy's plugin loader scans `~/.rummy/plugins/`, enters the
 `rummy.repo/` directory, and loads `rummy.repo.js` (matching the
-`{dirname}.js` convention). The loader calls
-`RepoMapPlugin.register(hooks)` during startup.
+`{dirname}.js` convention). The loader instantiates the class, passing
+a `PluginContext` as the sole constructor argument.
 
 ---
 
-## 2. Filter Registration
+## 2. Event Subscription
 
-### `hooks.file.symbols` (priority 50)
+### `core.on("entry.changed", fn)`
 
-The plugin registers a single filter on the `file.symbols` hook.
+The plugin subscribes to `entry.changed` events emitted by
+FileScanner when files are modified on disk.
+
+**Payload:**
 
 ```js
-hooks.file.symbols.addFilter(async (symbolMap, { paths, projectPath }) => {
-    // ...
-    return result;
-}, 50);
+{
+    rummy,    // RummyContext — auto-scoped to the current run
+    runId,    // number
+    turn,     // number
+    paths     // string[] — relative file paths that changed
+}
 ```
 
-| Property | Type | Description |
-|----------|------|-------------|
-| `symbolMap` | `Map<string, symbol[]>` | Input map, empty or partially populated by earlier filters |
-| `paths` | `string[]` | Relative file paths that changed since last scan |
-| `projectPath` | `string` | Absolute path to the project root |
-| **Returns** | `Map<string, symbol[]>` | Merged map with symbols for each file that could be parsed |
-
-The filter does not overwrite paths already present in the input map.
-This allows higher-priority filters to provide symbols for specific
-files, with this plugin filling in the rest.
+The plugin destructures `rummy` and `paths`. It does not use `runId`
+or `turn` directly — RummyContext methods are already scoped to the run.
 
 ---
 
-## 3. Symbol Data Structure
+## 3. Extraction Pipeline
 
-Each symbol in the output arrays:
+For each path in the `paths` array:
+
+1. **Skip** if the path has no file extension
+2. **Check extension** against antlrmap's supported set
+3. **If supported**: read file body from the store via
+   `rummy.getBody(path)`, parse with `antlrmap.mapSource(body, ext)`
+   - If symbols are returned, format and write attributes, move to next
+   - If antlrmap returns empty or throws, fall through to ctags
+4. **If unsupported or antlrmap failed**: queue for ctags
+
+After all paths are processed:
+
+5. **Ctags batch**: invoke `ctags --output-format=json --fields=+nS`
+   as a single synchronous child process against all queued paths
+6. **Write attributes** for each path with non-empty ctags results
+
+### 3.1 Antlrmap Integration
+
+Antlrmap is a hard dependency (`@possumtech/antlrmap`). The supported
+extension set is computed once at module load from `Antlrmap.extensions`.
+A new `Antlrmap` instance is created per event. File content is read
+from the store via `rummy.getBody(path)`, not from disk.
+
+### 3.2 Ctags Fallback
+
+`CtagsExtractor` wraps Universal Ctags in a synchronous child process.
+Ctags operates on disk files, using `rummy.project.project_root` as
+the working directory. If ctags is not installed (`ENOENT`) or returns non-zero, it
+logs a warning and returns empty arrays. No error is thrown.
+
+**Lua workaround**: ctags does not provide function signatures for Lua.
+`CtagsExtractor` extracts them from the ctags `pattern` field using a
+regex that handles both `function name(params)` and
+`name = function(params)` forms.
+
+---
+
+## 4. Symbol Data Structure
+
+Each symbol in the antlrmap output:
 
 ```js
 {
@@ -73,73 +114,23 @@ Ctags-sourced symbols use a slightly different shape:
 
 ---
 
-## 4. Extraction Pipeline
+## 5. Attribute Writing
 
-For each path in the `paths` array:
+After extraction, the plugin writes formatted symbols to the entry's
+attributes using the merge-based `setAttributes` API:
 
-1. **Skip** if the path already exists in the input map
-2. **Check extension** against antlrmap's supported set
-3. **If supported**: read file content, parse with `antlrmap.mapSource(content, ext)`
-   - If symbols are returned, add to result map and move to next file
-   - If antlrmap returns empty or throws, fall through to ctags
-4. **If unsupported or antlrmap failed**: queue the path for ctags
+```js
+await rummy.setAttributes(path, { symbols: formatSymbols(symbols) });
+```
 
-After all paths are processed:
-
-5. **Ctags batch**: invoke `ctags --output-format=json --fields=+nS -f - <paths>`
-   as a single synchronous child process
-6. **Merge** ctags results into the map (only paths with non-empty symbol arrays)
-
-### 4.1 Antlrmap Integration
-
-Antlrmap is a hard dependency (`@possumtech/antlrmap`). The supported
-extension set is computed once at module load from `Antlrmap.extensions`.
-A new `Antlrmap` instance is created per filter invocation. File content
-is read synchronously via `readFileSync`.
-
-### 4.2 Ctags Fallback
-
-`CtagsExtractor` wraps Universal Ctags in a synchronous child process.
-If ctags is not installed (`ENOENT`) or returns non-zero, it logs a
-warning and returns empty arrays for all queued paths. No error is
-thrown -- the plugin degrades gracefully.
-
-**Lua workaround**: ctags does not provide function signatures for Lua.
-`CtagsExtractor` extracts them from the ctags `pattern` field using a
-regex that handles both `function name(params)` and
-`name = function(params)` forms.
-
----
-
-## 5. Consumer Integration
-
-Rummy's `FileScanner` is the primary consumer of this filter. During
-project sync:
-
-1. FileScanner identifies changed files (by mtime, then content hash)
-2. Fires `hooks.file.symbols.filter(new Map(), { paths, projectPath })`
-3. For each file in the returned map, calls `formatSymbols(symbols)` to
-   produce an indented text tree
-4. Stores the formatted text in the file entry's `attributes.symbols`
-   via `knownStore.upsert()`
-
-The `attributes.symbols` value flows through:
-
-- **`v_model_context` VIEW**: files at `summary` state are categorized
-  as `file_summary` (ordinal bucket 5, between `file_index` and `file`)
-- **`ContextAssembler`**: renders `file_summary` entries as
-  `#### {path} (summary)\n{symbols}` blocks in the system message
-
-This gives the model a structural overview of files it hasn't read in
-full -- function names, class hierarchies, method signatures, and line
-numbers -- without consuming the token budget of the full file content.
+This preserves any existing attributes on the entry (e.g., `constraint`)
+and adds or replaces only the `symbols` key.
 
 ---
 
 ## 6. formatSymbols
 
-Exposed as `RepoMapPlugin.formatSymbols` for consumers that need to
-render symbol arrays as text.
+Internal formatter that converts symbol arrays to indented text.
 
 ### Algorithm
 
@@ -162,24 +153,39 @@ class MyClass L1
 class AnotherClass L25
 ```
 
-Nesting is derived from `line`/`endLine` ranges, not from explicit
-parent references. Params render as comma-joined if array, raw if
-string. Kind and line are omitted when absent.
+Nesting is derived from `line`/`endLine` ranges, not explicit parent
+references. Params render as comma-joined if array, raw if string.
+Kind and line are omitted when absent.
 
 ---
 
-## 7. Module Structure
+## 7. Consumer Integration
+
+The formatted symbol text flows through rummy's context assembly:
+
+- **`v_model_context` VIEW**: files at `summary` state are categorized
+  as `file_summary` (ordinal bucket 5, between `file_index` and `file`)
+- **`ContextAssembler`**: renders `file_summary` entries as
+  `#### {path} (summary)\n{symbols}` blocks in the system message
+
+This gives the model a structural overview of files it hasn't read in
+full — function names, class hierarchies, method signatures, and line
+numbers — without consuming the token budget of full file content.
+
+---
+
+## 8. Module Structure
 
 ```
 src/
-  rummy.repo.js        Plugin entry point. Registers the file.symbols filter.
+  rummy.repo.js        Plugin entry point. Subscribes to entry.changed.
   CtagsExtractor.js    Universal Ctags wrapper. Synchronous child process.
   formatSymbols.js      Symbol array → indented text tree.
 ```
 
 ---
 
-## 8. Testing
+## 9. Testing
 
 | Tier | Location | Coverage |
 |------|----------|----------|
@@ -187,9 +193,8 @@ src/
 
 Tests use Node's built-in test runner (`node:test`) and assertion module
 (`node:assert/strict`). `CtagsExtractor` tests inject a mock
-`spawnSync` to avoid requiring ctags on CI. The plugin filter test uses
-the plugin's own source files as fixtures to exercise the full antlrmap
-path.
+`spawnSync`. Plugin tests mock `PluginContext` and `RummyContext`,
+using the plugin's own source files as fixtures for the antlrmap path.
 
 ```bash
 npm test              # lint + unit tests with coverage

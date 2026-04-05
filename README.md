@@ -2,11 +2,11 @@
 
 Symbol extraction plugin for [Rummy](https://github.com/possumtech/rummy). Turns source files into structured symbol maps using [antlrmap](https://github.com/possumtech/antlrmap) (formal ANTLR4 grammars) with [Universal Ctags](https://ctags.io/) as a fallback.
 
-Antlrmap relies on ANTLR4's Grammar Zoo, mapping the symbol extraction process from formal EBNF grammars. More academically rigorous than tree-sitter heuristics, more accurate than ctags regex patterns, and more amenable to obscure and domain-specific languages. Don't like it? This is why symbol extraction is a plugin -- swap it out in 20 lines.
+Antlrmap relies on ANTLR4's Grammar Zoo, mapping the symbol extraction process from formal EBNF grammars. More academically rigorous than tree-sitter heuristics, more accurate than ctags regex patterns, and more amenable to obscure and domain-specific languages. Don't like it? This is why symbol extraction is a plugin -- swap it out.
 
 ## What It Does
 
-When files change in a Rummy project, this plugin extracts their symbols (functions, classes, methods, fields) and returns them as structured data. Rummy stores the formatted symbol tree in file entry attributes, giving the model a compact map of the codebase without reading every file.
+When files change in a Rummy project, this plugin reacts to `entry.changed` events, extracts symbols (functions, classes, methods, fields) from the changed files, and writes a formatted symbol tree into each file entry's `attributes.symbols`. This gives the model a compact structural overview of the codebase without reading every file in full.
 
 ## Supported Languages
 
@@ -29,25 +29,11 @@ Rummy loads plugins from `~/.rummy/plugins/` on startup. No configuration requir
 
 ## Usage
 
-The plugin registers automatically via the standard Rummy plugin contract. No manual setup needed.
-
-```js
-// Rummy's plugin loader calls this automatically:
-import RepoMapPlugin from "@possumtech/rummy.repo";
-RepoMapPlugin.register(hooks);
-```
-
-### formatSymbols
-
-The plugin exposes a `formatSymbols` helper for rendering symbol arrays as indented text:
+The plugin registers automatically via the Rummy plugin contract. No manual setup needed.
 
 ```js
 import RepoMapPlugin from "@possumtech/rummy.repo";
-
-const text = RepoMapPlugin.formatSymbols(symbols);
-// class MyClass L1
-//   method doThing(a, b) L5
-//   field name L3
+new RepoMapPlugin(core);
 ```
 
 ## Development
