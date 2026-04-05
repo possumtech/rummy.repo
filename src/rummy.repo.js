@@ -1,13 +1,44 @@
 import { extname } from "node:path";
 import Antlrmap from "@possumtech/antlrmap";
 import CtagsExtractor from "./CtagsExtractor.js";
+import FileScanner from "./FileScanner.js";
 import formatSymbols from "./formatSymbols.js";
+import ProjectContext from "./ProjectContext.js";
 
 const antlrmapSupported = new Set(Object.keys(Antlrmap.extensions));
 
-export default class RepoMapPlugin {
+export default class Repo {
+	#core;
+	#scanner = null;
+
 	constructor(core) {
+		this.#core = core;
+		core.on("turn.started", this.#onTurnStarted.bind(this));
 		core.on("entry.changed", this.#onChanged.bind(this));
+	}
+
+	async #onTurnStarted({ rummy }) {
+		if (rummy.noContext) return;
+		const project = rummy.project;
+		if (!project?.project_root) return;
+
+		if (!this.#scanner) {
+			this.#scanner = new FileScanner(
+				rummy.entries,
+				this.#core.db || rummy.db,
+				this.#core.hooks,
+			);
+		}
+
+		const ctx = await ProjectContext.open(project.project_root);
+		const files = await ctx.getMappableFiles();
+		await this.#scanner.scan(
+			project.project_root,
+			project.id,
+			files,
+			rummy.sequence,
+			rummy,
+		);
 	}
 
 	async #onChanged({ rummy, paths }) {
