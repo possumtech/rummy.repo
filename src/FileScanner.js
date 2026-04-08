@@ -135,15 +135,16 @@ export default class FileScanner {
 				relPath,
 				this.#hooks.hedberg.match,
 			);
-			const state = constraint === "active" ? "full" : entry?.state || "index";
+			const fidelity = constraint === "active" ? "full" : entry?.fidelity || "index";
 
 			await this.#knownStore.upsert(
 				runId,
 				currentTurn,
 				relPath,
 				content,
-				state,
+				200,
 				{
+					fidelity,
 					hash,
 					attributes: { constraint },
 					updatedAt: new Date(mtime).toISOString(),
@@ -188,8 +189,9 @@ export default class FileScanner {
 				currentTurn,
 				relPath,
 				content,
-				constraint === "active" ? "full" : "index",
+				200,
 				{
+					fidelity: constraint === "active" ? "full" : "index",
 					hash: hashContent(content),
 					attributes: { constraint },
 					updatedAt: new Date(mtime).toISOString(),

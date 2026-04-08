@@ -15,6 +15,19 @@ export default class RummyRepo {
 		this.#core = core;
 		core.on("turn.started", this.#onTurnStarted.bind(this));
 		core.on("entry.changed", this.#onChanged.bind(this));
+
+		// Register summary view for file scheme — render symbols when available
+		core.hooks.tools.onView(
+			"file",
+			(entry) => {
+				const attrs =
+					typeof entry.attributes === "string"
+						? JSON.parse(entry.attributes)
+						: entry.attributes;
+				return attrs?.symbols || entry.body || "";
+			},
+			"summary",
+		);
 	}
 
 	async #onTurnStarted({ rummy }) {
