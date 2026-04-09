@@ -8,11 +8,12 @@ import FileScanner from "./FileScanner.js";
 function mockKnownStore() {
 	const entries = new Map();
 	return {
-		async upsert(runId, _turn, path, content, state, opts = {}) {
+		async upsert(runId, _turn, path, content, status, opts = {}) {
 			entries.set(`${runId}:${path}`, {
 				path,
 				body: content,
-				state,
+				status,
+				fidelity: opts.fidelity,
 				hash: opts.hash,
 				attributes: opts.attributes,
 				updated_at: opts.updatedAt,
@@ -89,7 +90,8 @@ describe("FileScanner", () => {
 		const entry = store.entries.get("1:hello.js");
 		assert.ok(entry);
 		assert.equal(entry.body, "const x = 1;");
-		assert.equal(entry.state, "index");
+		assert.equal(entry.status, 200);
+		assert.equal(entry.fidelity, "index");
 	});
 
 	it("skips unchanged files on second scan", async () => {
@@ -155,7 +157,7 @@ describe("FileScanner", () => {
 		const scanner = new FileScanner(store, db, hooks);
 
 		await scanner.scan(tmpDir, 1, ["main.js"], 1, {});
-		assert.equal(store.entries.get("1:main.js").state, "full");
+		assert.equal(store.entries.get("1:main.js").fidelity, "full");
 	});
 
 	it("removes files deleted from disk", async () => {

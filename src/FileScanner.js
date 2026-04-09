@@ -135,21 +135,15 @@ export default class FileScanner {
 				relPath,
 				this.#hooks.hedberg.match,
 			);
-			const fidelity = constraint === "active" ? "full" : entry?.fidelity || "index";
+			const fidelity =
+				constraint === "active" ? "full" : entry?.fidelity || "index";
 
-			await this.#knownStore.upsert(
-				runId,
-				currentTurn,
-				relPath,
-				content,
-				200,
-				{
-					fidelity,
-					hash,
-					attributes: { constraint },
-					updatedAt: new Date(mtime).toISOString(),
-				},
-			);
+			await this.#knownStore.upsert(runId, currentTurn, relPath, content, 200, {
+				fidelity,
+				hash,
+				attributes: { constraint },
+				updatedAt: new Date(mtime).toISOString(),
+			});
 		}
 
 		// Emit entry.changed for all changed files
@@ -184,19 +178,12 @@ export default class FileScanner {
 				relPath,
 				this.#hooks.hedberg.match,
 			);
-			await this.#knownStore.upsert(
-				runId,
-				currentTurn,
-				relPath,
-				content,
-				200,
-				{
-					fidelity: constraint === "active" ? "full" : "index",
-					hash: hashContent(content),
-					attributes: { constraint },
-					updatedAt: new Date(mtime).toISOString(),
-				},
-			);
+			await this.#knownStore.upsert(runId, currentTurn, relPath, content, 200, {
+				fidelity: constraint === "active" ? "full" : "index",
+				hash: hashContent(content),
+				attributes: { constraint },
+				updatedAt: new Date(mtime).toISOString(),
+			});
 		}
 
 		// Remove files deleted from disk

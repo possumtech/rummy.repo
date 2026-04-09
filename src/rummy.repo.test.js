@@ -17,6 +17,9 @@ function mockCore(dbOverride = null) {
 			entry: {
 				changed: { async emit() {} },
 			},
+			tools: {
+				onView() {},
+			},
 		},
 		on(event, fn) {
 			if (!listeners.has(event)) listeners.set(event, []);
@@ -50,11 +53,12 @@ function mockRummy(bodies = {}, projectRoot = __dirname) {
 function mockKnownStore() {
 	const entries = new Map();
 	return {
-		async upsert(runId, _turn, path, content, state, opts = {}) {
+		async upsert(runId, _turn, path, content, status, opts = {}) {
 			entries.set(`${runId}:${path}`, {
 				path,
 				body: content,
-				state,
+				status,
+				fidelity: opts.fidelity,
 				hash: opts.hash,
 				attributes: opts.attributes,
 				updated_at: opts.updatedAt,

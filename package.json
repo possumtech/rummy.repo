@@ -1,6 +1,6 @@
 {
 	"name": "@possumtech/rummy.repo",
-	"version": "0.0.6",
+	"version": "0.0.7",
 	"description": "Rummy plugin for symbol extraction via antlrmap and ctags",
 	"keywords": [
 		"rummy",
