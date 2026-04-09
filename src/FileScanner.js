@@ -130,6 +130,25 @@ export default class FileScanner {
 
 			changedPaths.push(relPath);
 
+			// Log external edit as a set:// entry with diff
+			if (entry?.body && this.#hooks?.hedberg?.generatePatch) {
+				const diff = this.#hooks.hedberg.generatePatch(
+					relPath,
+					entry.body,
+					content,
+				);
+				if (diff) {
+					await this.#knownStore.upsert(
+						runId,
+						currentTurn,
+						`set://${relPath}`,
+						diff,
+						200,
+						{ attributes: { path: relPath, external: true } },
+					);
+				}
+			}
+
 			const constraint = matchConstraint(
 				constraints,
 				relPath,
