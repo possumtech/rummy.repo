@@ -33,7 +33,7 @@ function mockRummy(bodies = {}, projectRoot = __dirname) {
 	const attributes = {};
 	return {
 		project: { project_root: projectRoot, id: 1 },
-		noContext: false,
+		noRepo: false,
 		sequence: 1,
 		entries: mockKnownStore(),
 		db: mockDb(),
@@ -203,22 +203,22 @@ describe("RummyRepo", () => {
 	it("registers turn.started listener on construction", () => {
 		const core = mockCore();
 		new RummyRepo(core);
-		// Should not throw when emitting with noContext
-		assert.ok(core.emit("turn.started", { rummy: { noContext: true } }));
+		// Should not throw when emitting with noRepo
+		assert.ok(core.emit("turn.started", { rummy: { noRepo: true } }));
 	});
 
-	it("skips turn.started when noContext is true", async () => {
+	it("skips turn.started when noRepo is true", async () => {
 		const core = mockCore();
 		new RummyRepo(core);
 		// Should return without error
-		await core.emit("turn.started", { rummy: { noContext: true } });
+		await core.emit("turn.started", { rummy: { noRepo: true } });
 	});
 
 	it("skips turn.started when project has no root", async () => {
 		const core = mockCore();
 		new RummyRepo(core);
 		await core.emit("turn.started", {
-			rummy: { noContext: false, project: {} },
+			rummy: { noRepo: false, project: {} },
 		});
 	});
 
@@ -253,7 +253,7 @@ describe("RummyRepo", () => {
 			const store = mockKnownStore();
 
 			const rummy = {
-				noContext: false,
+				noRepo: false,
 				project: { project_root: tmpDir, id: 1 },
 				sequence: 1,
 				entries: store,

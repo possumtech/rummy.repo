@@ -31,7 +31,7 @@ export default class RummyRepo {
 	}
 
 	async #onTurnStarted({ rummy }) {
-		if (rummy.noContext) return;
+		if (rummy.noRepo) return;
 		const project = rummy.project;
 		if (!project?.project_root) return;
 

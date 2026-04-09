@@ -34,7 +34,7 @@ The plugin stores `core` for access to `core.db`, `core.hooks`, and
 
 Fires every turn before context materialization. The plugin:
 
-1. Checks `rummy.noContext` — skips if true (no-context runs)
+1. Checks `rummy.noRepo` — skips if true (no-repo runs)
 2. Checks `rummy.project.project_root` — skips if absent
 3. Lazily creates a FileScanner (once per plugin lifetime)
 4. Opens a ProjectContext to enumerate git-tracked files
