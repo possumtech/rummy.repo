@@ -24,7 +24,7 @@ export default class RummyRepo {
 					typeof entry.attributes === "string"
 						? JSON.parse(entry.attributes)
 						: entry.attributes;
-				return attrs?.symbols || entry.body || "";
+				return attrs?.symbols || "";
 			},
 			"summary",
 		);
