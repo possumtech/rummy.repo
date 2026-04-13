@@ -155,7 +155,7 @@ export default class FileScanner {
 				this.#hooks.hedberg.match,
 			);
 			const fidelity =
-				constraint === "active" ? "full" : entry?.fidelity || "index";
+				constraint === "active" ? "full" : entry?.fidelity || "summary";
 
 			await this.#knownStore.upsert(runId, currentTurn, relPath, content, 200, {
 				fidelity,
@@ -198,7 +198,7 @@ export default class FileScanner {
 				this.#hooks.hedberg.match,
 			);
 			await this.#knownStore.upsert(runId, currentTurn, relPath, content, 200, {
-				fidelity: constraint === "active" ? "full" : "index",
+				fidelity: constraint === "active" ? "full" : "summary",
 				hash: hashContent(content),
 				attributes: { constraint },
 				updatedAt: new Date(mtime).toISOString(),

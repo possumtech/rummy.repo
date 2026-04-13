@@ -91,7 +91,7 @@ describe("FileScanner", () => {
 		assert.ok(entry);
 		assert.equal(entry.body, "const x = 1;");
 		assert.equal(entry.status, 200);
-		assert.equal(entry.fidelity, "index");
+		assert.equal(entry.fidelity, "summary");
 	});
 
 	it("skips unchanged files on second scan", async () => {
@@ -164,7 +164,10 @@ describe("FileScanner", () => {
 		const store = mockKnownStore();
 		const hooks = mockHooks();
 		// Pre-populate store with a file
-		await store.upsert(1, 0, "gone.js", "old", "index", { hash: "abc" });
+		await store.upsert(1, 0, "gone.js", "old", 200, {
+			fidelity: "summary",
+			hash: "abc",
+		});
 
 		const scanner = new FileScanner(store, mockDb(), hooks);
 		// Scan with empty file list — gone.js not on disk
