@@ -91,7 +91,7 @@ describe("FileScanner", () => {
 		assert.ok(entry);
 		assert.equal(entry.body, "const x = 1;");
 		assert.equal(entry.status, 200);
-		assert.equal(entry.fidelity, "summary");
+		assert.equal(entry.fidelity, "demoted");
 	});
 
 	it("skips unchanged files on second scan", async () => {
@@ -157,7 +157,7 @@ describe("FileScanner", () => {
 		const scanner = new FileScanner(store, db, hooks);
 
 		await scanner.scan(tmpDir, 1, ["main.js"], 1, {});
-		assert.equal(store.entries.get("1:main.js").fidelity, "full");
+		assert.equal(store.entries.get("1:main.js").fidelity, "promoted");
 	});
 
 	it("removes files deleted from disk", async () => {
@@ -165,7 +165,7 @@ describe("FileScanner", () => {
 		const hooks = mockHooks();
 		// Pre-populate store with a file
 		await store.upsert(1, 0, "gone.js", "old", 200, {
-			fidelity: "summary",
+			fidelity: "demoted",
 			hash: "abc",
 		});
 
