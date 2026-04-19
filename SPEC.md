@@ -4,7 +4,7 @@
 
 ## 1. Plugin Contract
 
-Implements the Rummy v0.2 plugin interface:
+Implements the Rummy v2 plugin interface:
 
 ```js
 export default class RummyRepo {
@@ -14,7 +14,7 @@ export default class RummyRepo {
     constructor(core) {
         this.#core = core;
         core.on("turn.started", this.#onTurnStarted.bind(this));
-        core.on("entry.changed", this.#onChanged.bind(this));
+        core.hooks.tools.onView("file", fn, "demoted");
     }
 }
 ```
@@ -24,30 +24,37 @@ in the environment. The loader imports the package, instantiates the class,
 and passes a `PluginContext` as the sole constructor argument.
 
 The plugin stores `core` for access to `core.db`, `core.hooks`, and
-`core.hooks.hedberg.match` (pattern matching for file constraints).
+`core.hooks.hedberg` (pattern matching and diff generation).
 
 ---
 
-## 2. Event Subscriptions
+## 2. Registration
 
 ### `core.on("turn.started", fn)`
 
 Fires every turn before context materialization. The plugin:
 
-1. Checks `rummy.noRepo` — skips if true (no-repo runs)
-2. Checks `rummy.project.project_root` — skips if absent
+1. Checks `rummy.noRepo` -- skips if true
+2. Checks `rummy.project.project_root` -- skips if absent
 3. Lazily creates a FileScanner (once per plugin lifetime)
 4. Opens a ProjectContext to enumerate git-tracked files
-5. Runs `scanner.scan()` to sync file entries
+5. Runs `scanner.scan()` to sync file entries with inline symbol extraction
 
-### `core.on("entry.changed", fn)`
+### `core.hooks.tools.onView("file", fn, "demoted")`
 
-Fires after FileScanner detects changed files. The plugin:
+Registers a view for file entries at demoted fidelity. When a file is
+demoted, the model sees its symbol tree (from `attributes.symbols`)
+instead of the full content. Returns empty string if no symbols exist.
 
-1. Filters paths by file extension
-2. Reads file bodies from the store via `rummy.getBody(path)`
-3. Extracts symbols (antlrmap first, ctags fallback)
-4. Writes formatted symbol text via `rummy.setAttributes(path, { symbols })`
+Handles both parsed and stringified attributes:
+
+```js
+(entry) => {
+    const attrs = typeof entry.attributes === "string"
+        ? JSON.parse(entry.attributes) : entry.attributes;
+    return attrs?.symbols || "";
+}
+```
 
 ---
 
@@ -60,19 +67,20 @@ database-stored file constraints.
 
 ```
 ProjectContext.open(projectRoot, dbFiles?)
-  → GitProvider.detectRoot()
-  → GitProvider.getHeadHash()      // cache key
-  → GitProvider.getTrackedFiles()  // Set<string>
-  → filter to files under project root
-  → merge with dbFiles
+  -> GitProvider.detectRoot()
+  -> GitProvider.getHeadHash()      // cache key
+  -> GitProvider.getTrackedFiles()  // Set<string>
+  -> filter to files under project root
+  -> merge with dbFiles
 ```
 
 Results are cached by HEAD hash. A new commit invalidates the cache.
 
 ### 3.2 GitProvider
 
-Pure JS git operations via isomorphic-git (optional dependency). Falls
-back to CLI `git` commands if isomorphic-git is not installed.
+CLI `git` first, with isomorphic-git (optional dependency) as fallback
+when git is not installed. CLI availability is checked once at module
+load. isomorphic-git is lazy-loaded only if needed.
 
 | Method | Purpose |
 |--------|---------|
@@ -83,7 +91,8 @@ back to CLI `git` commands if isomorphic-git is not installed.
 
 ### 3.3 FileScanner
 
-Syncs the filesystem into the known store for all active runs.
+Syncs the filesystem into the known store for all active runs. Symbols
+are extracted inline during the scan -- not via a separate event.
 
 **Per-scan flow:**
 
@@ -92,58 +101,51 @@ Syncs the filesystem into the known store for all active runs.
 3. Stat all files concurrently (no content reads), skip `ignore`-constrained
 4. For each file with changed mtime: read content, compute SHA-256 hash
 5. Skip if hash matches stored hash (mtime changed but content didn't)
-6. Upsert into known store with appropriate state (`full` for active, else preserve or `index`)
-7. Emit `entry.changed` with all changed paths
-8. Process truly new files (not in store at all)
-9. Remove entries for files deleted from disk
+6. If file existed before with different content, generate a diff via
+   `hooks.hedberg.generatePatch` and write a `set://` entry
+7. Extract symbols inline via antlrmap (ctags fallback queued)
+8. Write to store via `store.set()` with `state: "resolved"`,
+   fidelity (`"promoted"` for active, else `"demoted"`), and
+   `writer: "plugin"`
+9. Batch ctags extraction for files antlrmap couldn't handle
+10. Remove entries for files deleted from disk via `store.rm()`
 
 **Constraint matching** uses `hooks.hedberg.match` for pattern-based
 constraints (glob, regex, etc.) rather than exact string equality.
 
+**Store operations** use the v2 `store.set()` / `store.rm()` API with
+named arguments and `writer: "plugin"` attribution.
+
 ---
 
-## 4. Symbol Extraction Pipeline
+## 4. Symbol Extraction
 
-For each path in the `entry.changed` payload:
+Symbols are extracted inline during the file scan, not as a separate
+step. Each file write carries its `attributes.symbols` if extraction
+succeeded.
 
-1. **Skip** if the path has no file extension
-2. **Check extension** against antlrmap's supported set
-3. **If supported**: read file body from the store via
-   `rummy.getBody(path)`, parse with `antlrmap.mapSource(body, ext)`
-   - If symbols are returned, format and write attributes, move to next
-   - If antlrmap returns empty or throws, fall through to ctags
-4. **If unsupported or antlrmap failed**: queue for ctags
+### 4.1 Antlrmap (Primary)
 
-After all paths are processed:
+A single `Antlrmap` instance is created when the FileScanner is
+constructed and reused across all scans. For each changed file with a
+supported extension, `antlrmap.mapSource(content, ext)` is called. If
+symbols are returned, they are formatted and attached to the write.
 
-5. **Ctags batch**: invoke `ctags --output-format=json --fields=+nS`
-   as a single synchronous child process against all queued paths
-6. **Write attributes** for each path with non-empty results
+### 4.2 Ctags (Fallback)
 
-### 4.1 Antlrmap Integration
-
-Antlrmap is a hard dependency (`@possumtech/antlrmap`). The supported
-extension set is computed once at module load from `Antlrmap.extensions`.
-A new `Antlrmap` instance is created per event. File content is read
-from the store via `rummy.getBody(path)`, not from disk.
-
-### 4.2 Ctags Fallback
-
-`CtagsExtractor` wraps Universal Ctags in a synchronous child process.
-Ctags operates on disk files, using `rummy.project.project_root` as
-the working directory. If ctags is not installed (`ENOENT`) or returns
-non-zero, it logs a warning and returns empty arrays. No error is thrown.
+Files where antlrmap returns no symbols or has no grammar are queued
+for a single batched `ctags --output-format=json --fields=+nS`
+invocation. Results are written back as attribute-only updates via
+`store.set()`.
 
 **Lua workaround**: ctags does not provide function signatures for Lua.
-`CtagsExtractor` extracts them from the ctags `pattern` field using a
-regex that handles both `function name(params)` and
-`name = function(params)` forms.
+`CtagsExtractor` extracts them from the ctags `pattern` field.
 
 ---
 
 ## 5. Symbol Data Structure
 
-Each symbol in the antlrmap output:
+Antlrmap symbols:
 
 ```js
 {
@@ -155,7 +157,7 @@ Each symbol in the antlrmap output:
 }
 ```
 
-Ctags-sourced symbols use a slightly different shape:
+Ctags symbols:
 
 ```js
 {
@@ -169,23 +171,9 @@ Ctags-sourced symbols use a slightly different shape:
 
 ---
 
-## 6. Attribute Writing
+## 6. formatSymbols
 
-After extraction, the plugin writes formatted symbols to the entry's
-attributes using the merge-based `setAttributes` API:
-
-```js
-await rummy.setAttributes(path, { symbols: formatSymbols(symbols) });
-```
-
-This preserves any existing attributes on the entry (e.g., `constraint`)
-and adds or replaces only the `symbols` key.
-
----
-
-## 7. formatSymbols
-
-Internal formatter that converts symbol arrays to indented text.
+Converts symbol arrays to indented text trees.
 
 ### Algorithm
 
@@ -197,66 +185,44 @@ Internal formatter that converts symbol arrays to indented text.
    - Format as `{indent}{kind} {name}({params}) L{line}`
    - Push onto stack if it has a valid `endLine` range
 
-### Output Format
+### Output
 
 ```
 class MyClass L1
   method doThing(a, b) L5
   field name L3
-  method other() L12
-    function nested(x) L15
 class AnotherClass L25
 ```
 
-Nesting is derived from `line`/`endLine` ranges, not explicit parent
-references. Params render as comma-joined if array, raw if string.
-Kind and line are omitted when absent.
-
 ---
 
-## 8. Consumer Integration
-
-The formatted symbol text flows through rummy's context assembly:
-
-- **`v_model_context` VIEW**: files at `summary` state are categorized
-  as `file_summary` (ordinal bucket 5, between `file_index` and `file`)
-- **`ContextAssembler`**: renders `file_summary` entries as
-  `#### {path} (summary)\n{symbols}` blocks in the system message
-
-This gives the model a structural overview of files it hasn't read in
-full — function names, class hierarchies, method signatures, and line
-numbers — without consuming the token budget of full file content.
-
----
-
-## 9. Module Structure
+## 7. Module Structure
 
 ```
 src/
-  rummy.repo.js        Plugin entry point. Subscribes to turn.started and entry.changed.
-  FileScanner.js       Filesystem sync. Stats, hashes, upserts, emits entry.changed.
+  rummy.repo.js        Plugin entry. turn.started handler, demoted view registration.
+  FileScanner.js       File sync with inline symbol extraction. Diff generation.
   ProjectContext.js     Git-aware file enumeration. Caches by HEAD hash.
-  GitProvider.js        Git operations via isomorphic-git with CLI fallback.
+  GitProvider.js        CLI git first, isomorphic-git fallback. Lazy loaded.
   CtagsExtractor.js    Universal Ctags wrapper. Synchronous child process.
-  formatSymbols.js      Symbol array → indented text tree.
+  formatSymbols.js      Symbol array -> indented text tree.
 ```
 
 ---
 
-## 10. Testing
+## 8. Testing
 
 | Tier | Location | Coverage |
 |------|----------|----------|
 | Unit | `src/*.test.js` | 80% line/branch/function threshold |
 
 Tests use Node's built-in test runner (`node:test`) and assertion module
-(`node:assert/strict`). `CtagsExtractor` tests inject a mock
-`spawnSync`. FileScanner tests use temp directories with mock store/db.
-GitProvider and ProjectContext tests run against the real repo.
-Plugin tests mock `PluginContext` and `RummyContext`, using the
-plugin's own source files as fixtures for the antlrmap path.
-The `turn.started` integration test creates a temp git repo via
-isomorphic-git.
+(`node:assert/strict`). FileScanner tests use temp directories with mock
+store/db and verify inline symbol extraction, state/fidelity values,
+constraint handling, and `writer` attribution. GitProvider and
+ProjectContext tests run against the real repo. Plugin tests verify
+view registration, guard clauses, and end-to-end scanning with symbol
+attachment via temp git repos created with isomorphic-git.
 
 ```bash
 npm test              # lint + unit tests with coverage

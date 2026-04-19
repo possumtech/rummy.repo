@@ -1,40 +1,41 @@
 import crypto from "node:crypto";
 import { readFileSync } from "node:fs";
 import fs from "node:fs/promises";
-import { join } from "node:path";
+import { extname, join } from "node:path";
+import Antlrmap from "@possumtech/antlrmap";
+import CtagsExtractor from "./CtagsExtractor.js";
+import formatSymbols from "./formatSymbols.js";
+
+const antlrmapSupported = new Set(Object.keys(Antlrmap.extensions));
 
 function hashContent(content) {
 	return crypto.createHash("sha256").update(content).digest("hex");
 }
 
 export default class FileScanner {
-	#knownStore;
+	#store;
 	#db;
 	#hooks;
+	#antlrmap;
 
-	constructor(knownStore, db, hooks) {
-		this.#knownStore = knownStore;
+	constructor(store, db, hooks) {
+		this.#store = store;
 		this.#db = db;
 		this.#hooks = hooks;
+		this.#antlrmap = new Antlrmap();
 	}
 
 	/**
 	 * Scan the project and sync file entries across all active runs.
 	 * Uses filesystem mtime to skip unchanged files (no read, no hash).
+	 * Extracts symbols inline so each write carries its attributes.symbols.
 	 */
-	async scan(
-		projectPath,
-		projectId,
-		mappableFiles,
-		currentTurn = 0,
-		rummy = null,
-	) {
+	async scan(projectPath, projectId, mappableFiles, currentTurn = 0) {
 		const activeRuns = await this.#db.get_active_runs.all({
 			project_id: projectId,
 		});
 		if (activeRuns.length === 0) return;
 
-		// Load file constraints for this project
 		const constraintRows = await this.#db.get_file_constraints.all({
 			project_id: projectId,
 		});
@@ -42,14 +43,12 @@ export default class FileScanner {
 			constraintRows.map((c) => [c.pattern, c.visibility]),
 		);
 
-		// Include activated files that aren't in the git file list
 		for (const [pattern, visibility] of constraints) {
 			if (visibility === "active" && !mappableFiles.includes(pattern)) {
 				mappableFiles.push(pattern);
 			}
 		}
 
-		// Stat all files concurrently (no content reads), skip ignored
 		const diskStats = new Map();
 		const { match } = this.#hooks.hedberg;
 		const isIgnored = (relPath) =>
@@ -85,38 +84,26 @@ export default class FileScanner {
 				diskStats,
 				currentTurn,
 				constraints,
-				rummy,
 			);
 		}
 	}
 
-	async #syncRun(
-		runId,
-		_projectPath,
-		diskStats,
-		currentTurn,
-		constraints,
-		rummy,
-	) {
-		const existing = await this.#knownStore.getFileEntries(runId);
+	async #syncRun(runId, projectPath, diskStats, currentTurn, constraints) {
+		const existing = await this.#store.getFileEntries(runId);
 		const fileKeys = new Map();
-		for (const entry of existing) {
-			fileKeys.set(entry.path, entry);
-		}
+		for (const entry of existing) fileKeys.set(entry.path, entry);
 
-		const changedPaths = [];
+		const ctagsQueue = [];
 
 		for (const [relPath, { mtime, fullPath }] of diskStats) {
 			const entry = fileKeys.get(relPath);
 			fileKeys.delete(relPath);
 
-			// Skip if mtime hasn't changed since last scan
 			const storedMtime = entry?.updated_at
 				? new Date(entry.updated_at).getTime()
 				: 0;
 			if (entry && Math.abs(mtime - storedMtime) < 1000) continue;
 
-			// mtime changed — read and hash
 			let content;
 			try {
 				content = readFileSync(fullPath, "utf8");
@@ -124,13 +111,8 @@ export default class FileScanner {
 				continue;
 			}
 			const hash = hashContent(content);
-
-			// Skip if hash matches (mtime changed but content didn't)
 			if (entry?.hash === hash) continue;
 
-			changedPaths.push(relPath);
-
-			// Log external edit as a set:// entry with diff
 			if (entry?.body && this.#hooks?.hedberg?.generatePatch) {
 				const diff = this.#hooks.hedberg.generatePatch(
 					relPath,
@@ -138,14 +120,15 @@ export default class FileScanner {
 					content,
 				);
 				if (diff) {
-					await this.#knownStore.upsert(
+					await this.#store.set({
 						runId,
-						currentTurn,
-						`set://${relPath}`,
-						diff,
-						200,
-						{ attributes: { path: relPath, external: true } },
-					);
+						turn: currentTurn,
+						path: `set://${relPath}`,
+						body: diff,
+						state: "resolved",
+						attributes: { path: relPath, external: true },
+						writer: "plugin",
+					});
 				}
 			}
 
@@ -157,57 +140,58 @@ export default class FileScanner {
 			const fidelity =
 				constraint === "active" ? "promoted" : entry?.fidelity || "demoted";
 
-			await this.#knownStore.upsert(runId, currentTurn, relPath, content, 200, {
-				fidelity,
+			const attributes = {
+				constraint,
 				hash,
-				attributes: { constraint },
 				updatedAt: new Date(mtime).toISOString(),
-			});
-		}
+			};
+			const symbols = await this.#extractAntlrSymbols(relPath, content);
+			if (symbols != null) {
+				attributes.symbols = symbols;
+			} else if (extname(relPath)) {
+				ctagsQueue.push(relPath);
+			}
 
-		// Emit entry.changed for all changed files
-		if (changedPaths.length > 0 && this.#hooks?.entry?.changed) {
-			await this.#hooks.entry.changed.emit({
-				rummy,
+			await this.#store.set({
 				runId,
 				turn: currentTurn,
-				paths: changedPaths,
+				path: relPath,
+				body: content,
+				state: "resolved",
+				fidelity,
+				attributes,
+				writer: "plugin",
 			});
 		}
 
-		// New files that aren't in the store yet
-		for (const [relPath, { mtime, fullPath }] of diskStats) {
-			if (fileKeys.has(relPath)) continue;
-			const alreadyProcessed = changedPaths.includes(relPath);
-			if (alreadyProcessed) continue;
-
-			// Check if it was already handled above (existed + unchanged)
-			const entry = existing.find((e) => e.path === relPath);
-			if (entry) continue;
-
-			// Truly new file
-			let content;
-			try {
-				content = readFileSync(fullPath, "utf8");
-			} catch {
-				continue;
+		if (ctagsQueue.length > 0) {
+			const extractor = new CtagsExtractor(projectPath);
+			const ctagsResults = extractor.extract(ctagsQueue);
+			for (const [path, symbols] of ctagsResults) {
+				if (symbols.length === 0) continue;
+				await this.#store.set({
+					runId,
+					path,
+					attributes: { symbols: formatSymbols(symbols) },
+					writer: "plugin",
+				});
 			}
-			const constraint = matchConstraint(
-				constraints,
-				relPath,
-				this.#hooks.hedberg.match,
-			);
-			await this.#knownStore.upsert(runId, currentTurn, relPath, content, 200, {
-				fidelity: constraint === "active" ? "promoted" : "demoted",
-				hash: hashContent(content),
-				attributes: { constraint },
-				updatedAt: new Date(mtime).toISOString(),
-			});
 		}
 
-		// Remove files deleted from disk
 		for (const [relPath] of fileKeys) {
-			await this.#knownStore.remove(runId, relPath);
+			await this.#store.rm({ runId, path: relPath, writer: "plugin" });
+		}
+	}
+
+	async #extractAntlrSymbols(relPath, content) {
+		const ext = extname(relPath);
+		if (!ext || !antlrmapSupported.has(ext)) return null;
+		try {
+			const symbols = await this.#antlrmap.mapSource(content, ext);
+			if (!symbols || symbols.length === 0) return null;
+			return formatSymbols(symbols);
+		} catch {
+			return null;
 		}
 	}
 }

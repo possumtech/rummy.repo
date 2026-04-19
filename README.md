@@ -1,6 +1,6 @@
 # rummy.repo
 
-File scanning and symbol extraction plugin for [Rummy](https://github.com/possumtech/rummy). Discovers project files via git, syncs them into the known store, detects changes, and extracts symbols using [antlrmap](https://github.com/possumtech/antlrmap) (formal ANTLR4 grammars) with [Universal Ctags](https://ctags.io/) as a fallback.
+File scanning and symbol extraction plugin for [Rummy](https://github.com/possumtech/rummy). Discovers project files via git, syncs them into the known store, and extracts symbols using [antlrmap](https://github.com/possumtech/antlrmap) (formal ANTLR4 grammars) with [Universal Ctags](https://ctags.io/) as a fallback.
 
 Antlrmap relies on ANTLR4's Grammar Zoo, mapping the symbol extraction process from formal EBNF grammars. More academically rigorous than tree-sitter heuristics, more accurate than ctags regex patterns, and more amenable to obscure and domain-specific languages. Don't like it? This is why symbol extraction is a plugin -- swap it out.
 
@@ -8,14 +8,14 @@ Antlrmap relies on ANTLR4's Grammar Zoo, mapping the symbol extraction process f
 
 Every turn, this plugin:
 
-1. Enumerates project files from git (via isomorphic-git or CLI fallback)
+1. Enumerates project files from git (via CLI git, with isomorphic-git fallback)
 2. Stats and hashes files to detect changes since the last scan
-3. Syncs file entries into the known store (upsert changed, remove deleted)
-4. Emits `entry.changed` with the list of modified paths
-5. Reacts to `entry.changed` by extracting symbols from changed files
-6. Writes formatted symbol trees into each file entry's `attributes.symbols`
+3. Extracts symbols inline from changed files during the scan
+4. Writes file entries to the store with symbols attached as attributes
+5. Generates diffs for files that changed since the last scan
+6. Removes entries for files deleted from disk
 
-The model gets a compact structural overview of the codebase -- function names, class hierarchies, method signatures, line numbers -- without reading every file in full.
+The model gets a compact structural overview of the codebase -- function names, class hierarchies, method signatures, line numbers -- without reading every file in full. When files are demoted, the `onView` handler renders the symbol tree instead of the full content.
 
 ## Supported Languages
 
@@ -41,7 +41,7 @@ Rummy loads external plugins from `RUMMY_PLUGIN_*` env vars on startup. No other
 
 ## Usage
 
-The plugin registers automatically via the Rummy v0.2 plugin contract. No manual setup needed.
+The plugin registers automatically via the Rummy v2 plugin contract. No manual setup needed.
 
 ```js
 import RummyRepo from "@possumtech/rummy.repo";
@@ -50,7 +50,7 @@ new RummyRepo(core);
 
 ## Optional Dependencies
 
-- **isomorphic-git** -- Pure JS git implementation. Used for file enumeration and HEAD detection. Falls back to CLI `git` commands if not installed.
+- **isomorphic-git** -- Pure JS git implementation. Used as a fallback when CLI `git` is not available. CLI git is preferred when present.
 - **Universal Ctags** -- Fallback symbol extractor for languages not supported by antlrmap. Not required.
 
 ## Development
