@@ -18,7 +18,7 @@ export default class RummyRepo {
 						: entry.attributes;
 				return attrs?.symbols || "";
 			},
-			"demoted",
+			"summarized",
 		);
 	}
 

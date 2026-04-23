@@ -16,8 +16,8 @@ function mockCore(dbOverride = null) {
 			hedberg: { match: (pattern, str) => pattern === str },
 			tools: {
 				views: [],
-				onView(scheme, fn, fidelity) {
-					this.views.push({ scheme, fn, fidelity });
+				onView(scheme, fn, visibility) {
+					this.views.push({ scheme, fn, visibility });
 				},
 			},
 		},
@@ -46,7 +46,7 @@ function mockStore() {
 				path: args.path,
 				body: args.body ?? prev.body,
 				state: args.state ?? prev.state,
-				fidelity: args.fidelity ?? prev.fidelity,
+				visibility: args.visibility ?? prev.visibility,
 				attributes: attrs,
 				hash: attrs.hash ?? prev.hash,
 				updated_at: attrs.updatedAt ?? prev.updated_at,
@@ -78,11 +78,11 @@ function mockDb() {
 }
 
 describe("RummyRepo", () => {
-	it("registers a demoted view for the file scheme", () => {
+	it("registers a summarized view for the file scheme", () => {
 		const core = mockCore();
 		new RummyRepo(core);
 		const view = core.hooks.tools.views.find(
-			(v) => v.scheme === "file" && v.fidelity === "demoted",
+			(v) => v.scheme === "file" && v.visibility === "summarized",
 		);
 		assert.ok(view);
 		assert.equal(view.fn({ attributes: { symbols: "sym" } }), "sym");

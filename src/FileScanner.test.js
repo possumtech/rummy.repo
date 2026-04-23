@@ -22,9 +22,9 @@ function mockStore() {
 				path: args.path,
 				body: args.body ?? prev.body,
 				state: args.state ?? prev.state,
-				fidelity: args.fidelity ?? prev.fidelity,
+				visibility: args.visibility ?? prev.visibility,
 				attributes: attrs,
-				hash: attrs.hash ?? prev.hash,
+				hash: args.hash ?? prev.hash,
 				updated_at: attrs.updatedAt ?? prev.updated_at,
 				writer: args.writer ?? prev.writer,
 			};
@@ -92,7 +92,7 @@ describe("FileScanner", () => {
 		assert.ok(entry);
 		assert.equal(entry.body, "const x = 1;");
 		assert.equal(entry.state, "resolved");
-		assert.equal(entry.fidelity, "demoted");
+		assert.equal(entry.visibility, "summarized");
 		assert.equal(entry.writer, "plugin");
 	});
 
@@ -147,7 +147,7 @@ describe("FileScanner", () => {
 		assert.equal(store.entries.has("1:secret.env"), false);
 	});
 
-	it("sets active constraint files to promoted fidelity", async () => {
+	it("sets active constraint files to visible visibility", async () => {
 		writeFileSync(join(tmpDir, "main.js"), "export default {};");
 		const store = mockStore();
 		const db = mockDb(
@@ -157,7 +157,7 @@ describe("FileScanner", () => {
 		const scanner = new FileScanner(store, db, mockHooks());
 
 		await scanner.scan(tmpDir, 1, ["main.js"], 1);
-		assert.equal(store.entries.get("1:main.js").fidelity, "promoted");
+		assert.equal(store.entries.get("1:main.js").visibility, "visible");
 	});
 
 	it("removes files deleted from disk via rm", async () => {
@@ -168,8 +168,8 @@ describe("FileScanner", () => {
 			path: "gone.js",
 			body: "old",
 			state: "resolved",
-			fidelity: "demoted",
-			attributes: { hash: "abc" },
+			visibility: "summarized",
+			hash: "abc",
 			writer: "plugin",
 		});
 

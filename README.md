@@ -15,7 +15,7 @@ Every turn, this plugin:
 5. Generates diffs for files that changed since the last scan
 6. Removes entries for files deleted from disk
 
-The model gets a compact structural overview of the codebase -- function names, class hierarchies, method signatures, line numbers -- without reading every file in full. When files are demoted, the `onView` handler renders the symbol tree instead of the full content.
+The model gets a compact structural overview of the codebase -- function names, class hierarchies, method signatures, line numbers -- without reading every file in full. When files are summarized, the `onView` handler renders the symbol tree instead of the full content.
 
 ## Supported Languages
 

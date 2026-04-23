@@ -137,12 +137,14 @@ export default class FileScanner {
 				relPath,
 				this.#hooks.hedberg.match,
 			);
-			const fidelity =
-				constraint === "active" ? "promoted" : entry?.fidelity || "demoted";
+			// constraint=active → visible; otherwise preserve prior visibility
+			// so the model's own <get> / <set visibility=...> changes aren't
+			// clobbered on the next scan. First-scan default is summarized.
+			const visibility =
+				constraint === "active" ? "visible" : entry?.visibility || "summarized";
 
 			const attributes = {
 				constraint,
-				hash,
 				updatedAt: new Date(mtime).toISOString(),
 			};
 			const symbols = await this.#extractAntlrSymbols(relPath, content);
@@ -158,7 +160,8 @@ export default class FileScanner {
 				path: relPath,
 				body: content,
 				state: "resolved",
-				fidelity,
+				visibility,
+				hash,
 				attributes,
 				writer: "plugin",
 			});

@@ -14,7 +14,7 @@ export default class RummyRepo {
     constructor(core) {
         this.#core = core;
         core.on("turn.started", this.#onTurnStarted.bind(this));
-        core.hooks.tools.onView("file", fn, "demoted");
+        core.hooks.tools.onView("file", fn, "summarized");
     }
 }
 ```
@@ -40,10 +40,10 @@ Fires every turn before context materialization. The plugin:
 4. Opens a ProjectContext to enumerate git-tracked files
 5. Runs `scanner.scan()` to sync file entries with inline symbol extraction
 
-### `core.hooks.tools.onView("file", fn, "demoted")`
+### `core.hooks.tools.onView("file", fn, "summarized")`
 
-Registers a view for file entries at demoted fidelity. When a file is
-demoted, the model sees its symbol tree (from `attributes.symbols`)
+Registers a view for file entries at summarized visibility. When a file
+is summarized, the model sees its symbol tree (from `attributes.symbols`)
 instead of the full content. Returns empty string if no symbols exist.
 
 Handles both parsed and stringified attributes:
@@ -105,7 +105,7 @@ are extracted inline during the scan -- not via a separate event.
    `hooks.hedberg.generatePatch` and write a `set://` entry
 7. Extract symbols inline via antlrmap (ctags fallback queued)
 8. Write to store via `store.set()` with `state: "resolved"`,
-   fidelity (`"promoted"` for active, else `"demoted"`), and
+   visibility (`"visible"` for active, else `"summarized"`), and
    `writer: "plugin"`
 9. Batch ctags extraction for files antlrmap couldn't handle
 10. Remove entries for files deleted from disk via `store.rm()`
@@ -200,7 +200,7 @@ class AnotherClass L25
 
 ```
 src/
-  rummy.repo.js        Plugin entry. turn.started handler, demoted view registration.
+  rummy.repo.js        Plugin entry. turn.started handler, summarized view registration.
   FileScanner.js       File sync with inline symbol extraction. Diff generation.
   ProjectContext.js     Git-aware file enumeration. Caches by HEAD hash.
   GitProvider.js        CLI git first, isomorphic-git fallback. Lazy loaded.
@@ -218,8 +218,8 @@ src/
 
 Tests use Node's built-in test runner (`node:test`) and assertion module
 (`node:assert/strict`). FileScanner tests use temp directories with mock
-store/db and verify inline symbol extraction, state/fidelity values,
-constraint handling, and `writer` attribution. GitProvider and
+store/db and verify inline symbol extraction, state/visibility values,
+constraint handling, visibility values, and `writer` attribution. GitProvider and
 ProjectContext tests run against the real repo. Plugin tests verify
 view registration, guard clauses, and end-to-end scanning with symbol
 attachment via temp git repos created with isomorphic-git.
