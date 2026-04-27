@@ -92,7 +92,7 @@ describe("FileScanner", () => {
 		assert.ok(entry);
 		assert.equal(entry.body, "const x = 1;");
 		assert.equal(entry.state, "resolved");
-		assert.equal(entry.visibility, "summarized");
+		assert.equal(entry.visibility, "archived");
 		assert.equal(entry.writer, "plugin");
 	});
 

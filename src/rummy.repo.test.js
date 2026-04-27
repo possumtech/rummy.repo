@@ -21,6 +21,11 @@ function mockCore(dbOverride = null) {
 				},
 			},
 		},
+		registerScheme() {
+			// No-op for plugin-level tests; real PluginContext records to
+			// internal schemes array. Mock just exposes the entry point so
+			// the constructor doesn't throw.
+		},
 		on(event, fn) {
 			if (!listeners.has(event)) listeners.set(event, []);
 			listeners.get(event).push(fn);

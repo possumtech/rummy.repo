@@ -139,9 +139,13 @@ export default class FileScanner {
 			);
 			// constraint=active → visible; otherwise preserve prior visibility
 			// so the model's own <get> / <set visibility=...> changes aren't
-			// clobbered on the next scan. First-scan default is summarized.
+			// clobbered on the next scan. First-scan default is `archived`
+			// so a 5000-file repo doesn't dump 400K tokens into context
+			// before any work happens. The model navigates via the
+			// `repo://overview` entry (registered below) and promotes
+			// individual files to summarized/visible as needed.
 			const visibility =
-				constraint === "active" ? "visible" : entry?.visibility || "summarized";
+				constraint === "active" ? "visible" : entry?.visibility || "archived";
 
 			const attributes = {
 				constraint,
@@ -184,6 +188,95 @@ export default class FileScanner {
 		for (const [relPath] of fileKeys) {
 			await this.#store.rm({ runId, path: relPath, writer: "plugin" });
 		}
+
+		// Write the navigable project overview. Lives at `repo://overview`,
+		// visible by default. Lists root-level files + per-directory file
+		// counts + active/readonly constraints + a four-line navigation
+		// legend. Stays bounded regardless of repo size — the model uses
+		// `<get path="dir/" preview/>` to drill in.
+		await this.#store.set({
+			runId,
+			turn: currentTurn,
+			path: "repo://overview",
+			body: this.#renderOverview(projectPath, diskStats, constraints),
+			state: "resolved",
+			visibility: "visible",
+			writer: "plugin",
+		});
+	}
+
+	/**
+	 * Build the body of `repo://overview` — a compact, navigable map of
+	 * the project. Constant-ish in token cost regardless of repo size.
+	 */
+	#renderOverview(projectPath, diskStats, constraints) {
+		const rootFiles = [];
+		const dirCounts = new Map(); // top-level dir → file count
+
+		for (const [relPath, info] of diskStats) {
+			const slash = relPath.indexOf("/");
+			if (slash === -1) {
+				rootFiles.push({ path: relPath, ...info });
+			} else {
+				const dir = relPath.slice(0, slash);
+				dirCounts.set(dir, (dirCounts.get(dir) ?? 0) + 1);
+			}
+		}
+
+		const lines = [];
+		lines.push(`# ${projectPath} (${diskStats.size} files)`);
+		lines.push("");
+
+		if (rootFiles.length > 0) {
+			lines.push("## Root files");
+			rootFiles.toSorted((a, b) => a.path.localeCompare(b.path));
+			for (const f of rootFiles.slice(0, 50)) {
+				lines.push(`- ${f.path}`);
+			}
+			if (rootFiles.length > 50) {
+				lines.push(`- ... ${rootFiles.length - 50} more`);
+			}
+			lines.push("");
+		}
+
+		if (dirCounts.size > 0) {
+			lines.push("## Directories");
+			const dirs = [...dirCounts.entries()].toSorted((a, b) => b[1] - a[1]);
+			for (const [dir, count] of dirs) {
+				lines.push(`- ${dir}/ — ${count} file${count === 1 ? "" : "s"}`);
+			}
+			lines.push("");
+		}
+
+		const activeFiles = [...constraints.entries()]
+			.filter(([, vis]) => vis === "active")
+			.map(([p]) => p);
+		const readonlyFiles = [...constraints.entries()]
+			.filter(([, vis]) => vis === "readonly")
+			.map(([p]) => p);
+		if (activeFiles.length > 0 || readonlyFiles.length > 0) {
+			lines.push("## Constraints");
+			if (activeFiles.length > 0) {
+				lines.push(`- active: ${activeFiles.join(", ")}`);
+			}
+			if (readonlyFiles.length > 0) {
+				lines.push(`- readonly: ${readonlyFiles.join(", ")}`);
+			}
+			lines.push("");
+		}
+
+		lines.push("## Navigate");
+		lines.push(
+			'- Skim a folder\'s symbols: <set path="dir/**" visibility="summarized"/>',
+		);
+		lines.push('- Read a specific file: <get path="dir/file.ext"/>');
+		lines.push('- List a folder\'s files: <get path="dir/" preview/>');
+		lines.push('- Search across files: <get path="**" preview>keyword</get>');
+		lines.push(
+			'- Demote when done: <set path="dir/**" visibility="archived"/>',
+		);
+
+		return lines.join("\n");
 	}
 
 	async #extractAntlrSymbols(relPath, content) {
