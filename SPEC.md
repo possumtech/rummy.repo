@@ -13,7 +13,10 @@ export default class RummyRepo {
 
     constructor(core) {
         this.#core = core;
+        core.registerScheme({ name: "repo", category: "data" });
         core.on("turn.started", this.#onTurnStarted.bind(this));
+        core.hooks.tools.onView("repo", fn, "visible");
+        core.hooks.tools.onView("repo", fn, "summarized");
         core.hooks.tools.onView("file", fn, "summarized");
     }
 }
@@ -30,6 +33,12 @@ The plugin stores `core` for access to `core.db`, `core.hooks`, and
 
 ## 2. Registration
 
+### `core.registerScheme({ name: "repo", category: "data" })`
+
+Registers a new `repo://` URI scheme for entries describing the project
+itself. Category `"data"` places it in the same projection family as
+files. `model_visible` defaults to 1.
+
 ### `core.on("turn.started", fn)`
 
 Fires every turn before context materialization. The plugin:
@@ -39,6 +48,16 @@ Fires every turn before context materialization. The plugin:
 3. Lazily creates a FileScanner (once per plugin lifetime)
 4. Opens a ProjectContext to enumerate git-tracked files
 5. Runs `scanner.scan()` to sync file entries with inline symbol extraction
+
+### `core.hooks.tools.onView("repo", fn, "visible")`
+
+Full view: returns `entry.body` as-is.
+
+### `core.hooks.tools.onView("repo", fn, "summarized")`
+
+Truncated view: first 12 lines of the overview body, with a truncation
+notice. Enough to read top-level structure without consuming full token
+budget. Promote to visible to see the full tree.
 
 ### `core.hooks.tools.onView("file", fn, "summarized")`
 
@@ -58,9 +77,29 @@ Handles both parsed and stringified attributes:
 
 ---
 
-## 3. File Scanning Pipeline
+## 3. Visibility Model
 
-### 3.1 ProjectContext
+Files default to `"archived"` on first scan. A 5000-file repo doesn't
+dump 400K tokens into context before any work happens. The model
+navigates via the `repo://overview` entry (always visible) and promotes
+individual files to `"summarized"` or `"visible"` as needed.
+
+| Visibility | What the model sees |
+|------------|-------------------|
+| `"visible"` | Full file content |
+| `"summarized"` | Symbol tree from `attributes.symbols` |
+| `"archived"` | Nothing (retrievable via `<get>`) |
+
+The model controls promotion/demotion via `<set visibility="..."/>`.
+The plugin preserves prior visibility on re-scan so the model's own
+changes aren't clobbered. Only `constraint === "active"` forces
+`"visible"`.
+
+---
+
+## 4. File Scanning Pipeline
+
+### 4.1 ProjectContext
 
 Enumerates project files by combining git-tracked files with
 database-stored file constraints.
@@ -76,7 +115,7 @@ ProjectContext.open(projectRoot, dbFiles?)
 
 Results are cached by HEAD hash. A new commit invalidates the cache.
 
-### 3.2 GitProvider
+### 4.2 GitProvider
 
 CLI `git` first, with isomorphic-git (optional dependency) as fallback
 when git is not installed. CLI availability is checked once at module
@@ -89,10 +128,10 @@ load. isomorphic-git is lazy-loaded only if needed.
 | `getHeadHash(root)` | Current HEAD commit hash |
 | `isIgnored(root, path)` | Check `.gitignore` |
 
-### 3.3 FileScanner
+### 4.3 FileScanner
 
 Syncs the filesystem into the known store for all active runs. Symbols
-are extracted inline during the scan -- not via a separate event.
+are extracted inline during the scan.
 
 **Per-scan flow:**
 
@@ -105,10 +144,11 @@ are extracted inline during the scan -- not via a separate event.
    `hooks.hedberg.generatePatch` and write a `set://` entry
 7. Extract symbols inline via antlrmap (ctags fallback queued)
 8. Write to store via `store.set()` with `state: "resolved"`,
-   visibility (`"visible"` for active, else `"summarized"`), and
-   `writer: "plugin"`
+   visibility (`"visible"` for active, else preserve or `"archived"`),
+   and `writer: "plugin"`
 9. Batch ctags extraction for files antlrmap couldn't handle
 10. Remove entries for files deleted from disk via `store.rm()`
+11. Write `repo://overview` entry (always visible)
 
 **Constraint matching** uses `hooks.hedberg.match` for pattern-based
 constraints (glob, regex, etc.) rather than exact string equality.
@@ -118,20 +158,58 @@ named arguments and `writer: "plugin"` attribution.
 
 ---
 
-## 4. Symbol Extraction
+## 5. repo://overview
 
-Symbols are extracted inline during the file scan, not as a separate
-step. Each file write carries its `attributes.symbols` if extraction
-succeeded.
+A navigable project map written after each sync. Lives at
+`repo://overview` with `visibility: "visible"`. Stays bounded
+regardless of repo size.
 
-### 4.1 Antlrmap (Primary)
+**Content:**
+
+```
+# /path/to/project (N files)
+
+## Root files
+- package.json
+- README.md
+- ...
+
+## Directories
+- src/ — 42 files
+- test/ — 12 files
+- ...
+
+## Constraints
+- active: .env, config.js
+- readonly: LICENSE
+
+## Navigate
+- Skim a folder's symbols: <set path="dir/**" visibility="summarized"/>
+- Read a specific file: <get path="dir/file.ext"/>
+- List a folder's files: <get path="dir/" preview/>
+- Search across files: <get path="**" preview>keyword</get>
+- Demote when done: <set path="dir/**" visibility="archived"/>
+```
+
+Root files listed (up to 50), directories shown with file counts sorted
+by size, constraints listed if any exist. The navigation legend teaches
+the model how to explore.
+
+---
+
+## 6. Symbol Extraction
+
+Symbols are extracted inline during the file scan. Each file write
+carries its `attributes.symbols` if extraction succeeded.
+
+### 6.1 Antlrmap (Primary)
 
 A single `Antlrmap` instance is created when the FileScanner is
 constructed and reused across all scans. For each changed file with a
 supported extension, `antlrmap.mapSource(content, ext)` is called. If
 symbols are returned, they are formatted and attached to the write.
 
-### 4.2 Ctags (Fallback)
+### 6.2 Ctags (Fallback)
 
 Files where antlrmap returns no symbols or has no grammar are queued
 for a single batched `ctags --output-format=json --fields=+nS`
@@ -143,7 +221,7 @@ invocation. Results are written back as attribute-only updates via
 
 ---
 
-## 5. Symbol Data Structure
+## 7. Symbol Data Structure
 
 Antlrmap symbols:
 
@@ -171,7 +249,7 @@ Ctags symbols:
 
 ---
 
-## 6. formatSymbols
+## 8. formatSymbols
 
 Converts symbol arrays to indented text trees.
 
@@ -196,12 +274,12 @@ class AnotherClass L25
 
 ---
 
-## 7. Module Structure
+## 9. Module Structure
 
 ```
 src/
-  rummy.repo.js        Plugin entry. turn.started handler, summarized view registration.
-  FileScanner.js       File sync with inline symbol extraction. Diff generation.
+  rummy.repo.js        Plugin entry. Scheme registration, view handlers, turn.started.
+  FileScanner.js       File sync, inline symbol extraction, diff gen, repo://overview.
   ProjectContext.js     Git-aware file enumeration. Caches by HEAD hash.
   GitProvider.js        CLI git first, isomorphic-git fallback. Lazy loaded.
   CtagsExtractor.js    Universal Ctags wrapper. Synchronous child process.
@@ -210,7 +288,7 @@ src/
 
 ---
 
-## 8. Testing
+## 10. Testing
 
 | Tier | Location | Coverage |
 |------|----------|----------|
@@ -219,9 +297,10 @@ src/
 Tests use Node's built-in test runner (`node:test`) and assertion module
 (`node:assert/strict`). FileScanner tests use temp directories with mock
 store/db and verify inline symbol extraction, state/visibility values,
-constraint handling, visibility values, and `writer` attribution. GitProvider and
-ProjectContext tests run against the real repo. Plugin tests verify
-view registration, guard clauses, and end-to-end scanning with symbol
+constraint handling, repo://overview generation, and `writer`
+attribution. GitProvider and ProjectContext tests run against the real
+repo. Plugin tests verify scheme registration, view handlers (including
+truncation), guard clauses, and end-to-end scanning with symbol
 attachment via temp git repos created with isomorphic-git.
 
 ```bash

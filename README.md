@@ -14,8 +14,9 @@ Every turn, this plugin:
 4. Writes file entries to the store with symbols attached as attributes
 5. Generates diffs for files that changed since the last scan
 6. Removes entries for files deleted from disk
+7. Writes a navigable `repo://overview` entry with the project structure
 
-The model gets a compact structural overview of the codebase -- function names, class hierarchies, method signatures, line numbers -- without reading every file in full. When files are summarized, the `onView` handler renders the symbol tree instead of the full content.
+Files start at `"archived"` visibility -- a 5000-file repo doesn't dump its full content into context. The model navigates via `repo://overview` (always visible) and promotes files to `"summarized"` (symbol tree) or `"visible"` (full content) as needed. The plugin preserves the model's visibility choices across re-scans.
 
 ## Supported Languages
 

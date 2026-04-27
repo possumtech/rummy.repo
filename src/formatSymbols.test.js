@@ -9,7 +9,10 @@ describe("formatSymbols", () => {
 			{ name: "alpha", kind: "function", line: 1 },
 		];
 		const result = formatSymbols(symbols);
-		assert.equal(result, "function alpha L1\nfunction beta L10");
+		assert.equal(
+			result,
+			"<symbols>\nfunction alpha:1\nfunction beta:10\n</symbols>",
+		);
 	});
 
 	it("nests children inside parent by endLine", () => {
@@ -18,7 +21,10 @@ describe("formatSymbols", () => {
 			{ name: "inner", kind: "method", line: 5, endLine: 10 },
 		];
 		const result = formatSymbols(symbols);
-		assert.equal(result, "class Outer L1\n  method inner L5");
+		assert.equal(
+			result,
+			"<symbols>\nclass Outer:1\n  method inner:5\n</symbols>",
+		);
 	});
 
 	it("formats params as comma-separated list", () => {
@@ -26,7 +32,7 @@ describe("formatSymbols", () => {
 			{ name: "fn", kind: "function", params: ["a", "b"], line: 1 },
 		];
 		const result = formatSymbols(symbols);
-		assert.equal(result, "function fn(a, b) L1");
+		assert.equal(result, "<symbols>\nfunction fn(a, b):1\n</symbols>");
 	});
 
 	it("formats string params directly", () => {
@@ -34,17 +40,17 @@ describe("formatSymbols", () => {
 			{ name: "fn", kind: "function", params: "(x, y)", line: 1 },
 		];
 		const result = formatSymbols(symbols);
-		assert.equal(result, "function fn((x, y)) L1");
+		assert.equal(result, "<symbols>\nfunction fn((x, y)):1\n</symbols>");
 	});
 
 	it("handles symbols without kind or line", () => {
 		const symbols = [{ name: "mystery" }];
 		const result = formatSymbols(symbols);
-		assert.equal(result, "mystery");
+		assert.equal(result, "<symbols>\nmystery\n</symbols>");
 	});
 
-	it("returns empty string for empty array", () => {
-		assert.equal(formatSymbols([]), "");
+	it("returns wrapped empty for empty array", () => {
+		assert.equal(formatSymbols([]), "<symbols>\n\n</symbols>");
 	});
 
 	it("pops stack when line exceeds parent endLine", () => {
@@ -54,6 +60,9 @@ describe("formatSymbols", () => {
 			{ name: "B", kind: "class", line: 15, endLine: 25 },
 		];
 		const result = formatSymbols(symbols);
-		assert.equal(result, "class A L1\n  method m L5\nclass B L15");
+		assert.equal(
+			result,
+			"<symbols>\nclass A:1\n  method m:5\nclass B:15\n</symbols>",
+		);
 	});
 });

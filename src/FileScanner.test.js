@@ -160,6 +160,34 @@ describe("FileScanner", () => {
 		assert.equal(store.entries.get("1:main.js").visibility, "visible");
 	});
 
+	it("writes repo://overview with project structure", async () => {
+		writeFileSync(join(tmpDir, "app.js"), "const x = 1;");
+		writeFileSync(join(tmpDir, "README.md"), "# hi");
+		const { mkdirSync } = await import("node:fs");
+		mkdirSync(join(tmpDir, "src"));
+		writeFileSync(join(tmpDir, "src/index.js"), "export {};");
+		writeFileSync(join(tmpDir, "src/utils.js"), "export {};");
+
+		const store = mockStore();
+		const scanner = new FileScanner(store, mockDb(), mockHooks());
+
+		await scanner.scan(
+			tmpDir,
+			1,
+			["app.js", "README.md", "src/index.js", "src/utils.js"],
+			1,
+		);
+
+		const overview = store.entries.get("1:repo://overview");
+		assert.ok(overview, "expected repo://overview entry");
+		assert.equal(overview.state, "resolved");
+		assert.equal(overview.visibility, "visible");
+		assert.ok(overview.body.includes("app.js"));
+		assert.ok(overview.body.includes("src/"));
+		assert.ok(overview.body.includes("2 files"));
+		assert.ok(overview.body.includes("Navigate"));
+	});
+
 	it("removes files deleted from disk via rm", async () => {
 		const store = mockStore();
 		await store.set({

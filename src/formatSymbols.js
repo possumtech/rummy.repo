@@ -8,7 +8,7 @@ export default function formatSymbols(symbols) {
 		const depth = stack.length;
 		const indent = "  ".repeat(depth);
 		const kind = s.kind ? `${s.kind} ` : "";
-		const line = s.line ? ` L${s.line}` : "";
+		const line = s.line ? `:${s.line}` : "";
 		const p = s.params
 			? `(${Array.isArray(s.params) ? s.params.join(", ") : s.params})`
 			: "";
@@ -16,5 +16,5 @@ export default function formatSymbols(symbols) {
 		if (s.endLine && s.endLine > s.line) stack.push(s);
 	}
 
-	return lines.join("\n");
+	return `<symbols>\n${lines.join("\n")}\n</symbols>`;
 }

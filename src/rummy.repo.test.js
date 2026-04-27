@@ -83,6 +83,14 @@ function mockDb() {
 }
 
 describe("RummyRepo", () => {
+	it("registers the repo scheme", () => {
+		const schemes = [];
+		const core = mockCore();
+		core.registerScheme = (s) => schemes.push(s);
+		new RummyRepo(core);
+		assert.ok(schemes.some((s) => s.name === "repo" && s.category === "data"));
+	});
+
 	it("registers a summarized view for the file scheme", () => {
 		const core = mockCore();
 		new RummyRepo(core);
@@ -93,6 +101,45 @@ describe("RummyRepo", () => {
 		assert.equal(view.fn({ attributes: { symbols: "sym" } }), "sym");
 		assert.equal(view.fn({ attributes: '{"symbols":"parsed"}' }), "parsed");
 		assert.equal(view.fn({ attributes: {} }), "");
+	});
+
+	it("registers visible and summarized views for the repo scheme", () => {
+		const core = mockCore();
+		new RummyRepo(core);
+		const visible = core.hooks.tools.views.find(
+			(v) => v.scheme === "repo" && v.visibility === "visible",
+		);
+		const summarized = core.hooks.tools.views.find(
+			(v) => v.scheme === "repo" && v.visibility === "summarized",
+		);
+		assert.ok(visible);
+		assert.ok(summarized);
+		assert.equal(visible.fn({ body: "full content" }), "full content");
+	});
+
+	it("truncates repo summarized view to 12 lines", () => {
+		const core = mockCore();
+		new RummyRepo(core);
+		const summarized = core.hooks.tools.views.find(
+			(v) => v.scheme === "repo" && v.visibility === "summarized",
+		);
+		const longBody = Array.from({ length: 20 }, (_, i) => `line ${i}`).join(
+			"\n",
+		);
+		const result = summarized.fn({ body: longBody });
+		const lines = result.split("\n");
+		assert.equal(lines.length, 13); // 12 + truncation notice
+		assert.ok(result.includes("[truncated"));
+	});
+
+	it("does not truncate short repo body", () => {
+		const core = mockCore();
+		new RummyRepo(core);
+		const summarized = core.hooks.tools.views.find(
+			(v) => v.scheme === "repo" && v.visibility === "summarized",
+		);
+		const shortBody = "line 1\nline 2";
+		assert.equal(summarized.fn({ body: shortBody }), shortBody);
 	});
 
 	it("registers turn.started listener on construction", () => {
