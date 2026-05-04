@@ -61,9 +61,26 @@ function mockStore() {
 			entries.delete(`${runId}:${path}`);
 		},
 		async getFileEntries(runId) {
+			// Mirrors the real SQL: only bare-path (scheme IS NULL) entries.
 			const result = [];
 			for (const [key, val] of entries) {
-				if (key.startsWith(`${runId}:`)) result.push(val);
+				if (!key.startsWith(`${runId}:`)) continue;
+				const path = key.slice(`${runId}:`.length);
+				if (path.includes("://")) continue;
+				result.push(val);
+			}
+			return result;
+		},
+		async getEntriesByPattern(runId, pattern) {
+			const result = [];
+			for (const [key, val] of entries) {
+				if (!key.startsWith(`${runId}:`)) continue;
+				const path = key.slice(`${runId}:`.length);
+				if (pattern !== "**" && pattern !== path) continue;
+				const idx = path.indexOf("://");
+				const scheme = idx === -1 ? null : path.slice(0, idx);
+				const tokens = Math.ceil((val.body || "").length / 4);
+				result.push({ ...val, scheme, tokens });
 			}
 			return result;
 		},
@@ -83,12 +100,12 @@ function mockDb() {
 }
 
 describe("RummyRepo", () => {
-	it("registers the repo scheme", () => {
+	it("does not register a repo scheme (project state lives at log://turn_0/manifest)", () => {
 		const schemes = [];
 		const core = mockCore();
 		core.registerScheme = (s) => schemes.push(s);
 		new RummyRepo(core);
-		assert.ok(schemes.some((s) => s.name === "repo" && s.category === "data"));
+		assert.ok(!schemes.some((s) => s.name === "repo"));
 	});
 
 	it("registers a summarized view for the file scheme", () => {
@@ -103,43 +120,11 @@ describe("RummyRepo", () => {
 		assert.equal(view.fn({ attributes: {} }), "");
 	});
 
-	it("registers visible and summarized views for the repo scheme", () => {
+	it("does not register repo-scheme views", () => {
 		const core = mockCore();
 		new RummyRepo(core);
-		const visible = core.hooks.tools.views.find(
-			(v) => v.scheme === "repo" && v.visibility === "visible",
-		);
-		const summarized = core.hooks.tools.views.find(
-			(v) => v.scheme === "repo" && v.visibility === "summarized",
-		);
-		assert.ok(visible);
-		assert.ok(summarized);
-		assert.equal(visible.fn({ body: "full content" }), "full content");
-	});
-
-	it("truncates repo summarized view to 12 lines", () => {
-		const core = mockCore();
-		new RummyRepo(core);
-		const summarized = core.hooks.tools.views.find(
-			(v) => v.scheme === "repo" && v.visibility === "summarized",
-		);
-		const longBody = Array.from({ length: 20 }, (_, i) => `line ${i}`).join(
-			"\n",
-		);
-		const result = summarized.fn({ body: longBody });
-		const lines = result.split("\n");
-		assert.equal(lines.length, 13); // 12 + truncation notice
-		assert.ok(result.includes("[truncated"));
-	});
-
-	it("does not truncate short repo body", () => {
-		const core = mockCore();
-		new RummyRepo(core);
-		const summarized = core.hooks.tools.views.find(
-			(v) => v.scheme === "repo" && v.visibility === "summarized",
-		);
-		const shortBody = "line 1\nline 2";
-		assert.equal(summarized.fn({ body: shortBody }), shortBody);
+		const repoViews = core.hooks.tools.views.filter((v) => v.scheme === "repo");
+		assert.equal(repoViews.length, 0);
 	});
 
 	it("registers turn.started listener on construction", () => {

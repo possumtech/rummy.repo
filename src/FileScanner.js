@@ -44,7 +44,8 @@ export default class FileScanner {
 		);
 
 		for (const [pattern, visibility] of constraints) {
-			if (visibility === "active" && !mappableFiles.includes(pattern)) {
+			if (visibility === "ignore") continue;
+			if (!mappableFiles.includes(pattern)) {
 				mappableFiles.push(pattern);
 			}
 		}
@@ -137,15 +138,14 @@ export default class FileScanner {
 				relPath,
 				this.#hooks.hedberg.match,
 			);
-			// constraint=active → visible; otherwise preserve prior visibility
-			// so the model's own <get> / <set visibility=...> changes aren't
-			// clobbered on the next scan. First-scan default is `archived`
-			// so a 5000-file repo doesn't dump 400K tokens into context
-			// before any work happens. The model navigates via the
-			// `repo://overview` entry (registered below) and promotes
-			// individual files to summarized/visible as needed.
-			const visibility =
-				constraint === "active" ? "visible" : entry?.visibility || "archived";
+			// All constraint types ingest the file with default
+			// visibility="archived"; the model promotes via <get> /
+			// <set visibility=...>. Constraint type governs membership
+			// (add/readonly) and write permission (readonly), not
+			// initial in-context visibility. Preserve any existing
+			// entry visibility on re-scan so the model's own
+			// promote/demote isn't clobbered.
+			const visibility = entry?.visibility || "archived";
 
 			const attributes = {
 				constraint,
@@ -189,94 +189,40 @@ export default class FileScanner {
 			await this.#store.rm({ runId, path: relPath, writer: "plugin" });
 		}
 
-		// Write the navigable project overview. Lives at `repo://overview`,
-		// visible by default. Lists root-level files + per-directory file
-		// counts + active/readonly constraints + a four-line navigation
-		// legend. Stays bounded regardless of repo size — the model uses
-		// `<get path="dir/" preview/>` to drill in.
-		await this.#store.set({
+		// One-shot per-run project manifest at `log://turn_0/manifest`.
+		// Snapshot of all files with their token costs as of run start.
+		// Per-file entries (this loop above) carry current state across
+		// turns; the manifest is orientation, not authoritative state.
+		// Skipping the write when an entry already exists keeps the
+		// turn-0 path bit-identical for the run's lifetime — the prefix
+		// cache holds clean across every subsequent turn.
+		const existingManifest = await this.#store.getEntriesByPattern(
 			runId,
-			turn: currentTurn,
-			path: "repo://overview",
-			body: this.#renderOverview(projectPath, diskStats, constraints),
-			state: "resolved",
-			visibility: "visible",
-			writer: "plugin",
-		});
-	}
-
-	/**
-	 * Build the body of `repo://overview` — a compact, navigable map of
-	 * the project. Constant-ish in token cost regardless of repo size.
-	 */
-	#renderOverview(projectPath, diskStats, constraints) {
-		const rootFiles = [];
-		const dirCounts = new Map(); // top-level dir → file count
-
-		for (const [relPath, info] of diskStats) {
-			const slash = relPath.indexOf("/");
-			if (slash === -1) {
-				rootFiles.push({ path: relPath, ...info });
-			} else {
-				const dir = relPath.slice(0, slash);
-				dirCounts.set(dir, (dirCounts.get(dir) ?? 0) + 1);
-			}
-		}
-
-		const lines = [];
-		lines.push(`# ${projectPath} (${diskStats.size} files)`);
-		lines.push("");
-
-		if (rootFiles.length > 0) {
-			lines.push("## Root files");
-			rootFiles.toSorted((a, b) => a.path.localeCompare(b.path));
-			for (const f of rootFiles.slice(0, 50)) {
-				lines.push(`- ${f.path}`);
-			}
-			if (rootFiles.length > 50) {
-				lines.push(`- ... ${rootFiles.length - 50} more`);
-			}
-			lines.push("");
-		}
-
-		if (dirCounts.size > 0) {
-			lines.push("## Directories");
-			const dirs = [...dirCounts.entries()].toSorted((a, b) => b[1] - a[1]);
-			for (const [dir, count] of dirs) {
-				lines.push(`- ${dir}/ — ${count} file${count === 1 ? "" : "s"}`);
-			}
-			lines.push("");
-		}
-
-		const activeFiles = [...constraints.entries()]
-			.filter(([, vis]) => vis === "active")
-			.map(([p]) => p);
-		const readonlyFiles = [...constraints.entries()]
-			.filter(([, vis]) => vis === "readonly")
-			.map(([p]) => p);
-		if (activeFiles.length > 0 || readonlyFiles.length > 0) {
-			lines.push("## Constraints");
-			if (activeFiles.length > 0) {
-				lines.push(`- active: ${activeFiles.join(", ")}`);
-			}
-			if (readonlyFiles.length > 0) {
-				lines.push(`- readonly: ${readonlyFiles.join(", ")}`);
-			}
-			lines.push("");
-		}
-
-		lines.push("## Navigate");
-		lines.push(
-			'- Skim a folder\'s symbols: <set path="dir/**" visibility="summarized"/>',
+			"log://turn_0/manifest",
+			null,
 		);
-		lines.push('- Read a specific file: <get path="dir/file.ext"/>');
-		lines.push('- List a folder\'s files: <get path="dir/" preview/>');
-		lines.push('- Search across files: <get path="**" preview>keyword</get>');
-		lines.push(
-			'- Demote when done: <set path="dir/**" visibility="archived"/>',
-		);
-
-		return lines.join("\n");
+		if (existingManifest.length === 0) {
+			const fileEntries = await this.#store.getEntriesByPattern(
+				runId,
+				"**",
+				null,
+			);
+			const files = fileEntries
+				.filter((e) => e.scheme == null)
+				.toSorted((a, b) => a.path.localeCompare(b.path));
+			const body = files
+				.map((f) => `* ${f.path} - ${f.tokens} tokens`)
+				.join("\n");
+			await this.#store.set({
+				runId,
+				turn: 0,
+				path: "log://turn_0/manifest",
+				body,
+				state: "resolved",
+				visibility: "visible",
+				writer: "plugin",
+			});
+		}
 	}
 
 	async #extractAntlrSymbols(relPath, content) {

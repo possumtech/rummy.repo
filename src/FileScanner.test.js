@@ -35,9 +35,26 @@ function mockStore() {
 			entries.delete(`${runId}:${path}`);
 		},
 		async getFileEntries(runId) {
+			// Mirrors the real SQL: only bare-path (scheme IS NULL) entries.
 			const result = [];
 			for (const [key, val] of entries) {
-				if (key.startsWith(`${runId}:`)) result.push(val);
+				if (!key.startsWith(`${runId}:`)) continue;
+				const path = key.slice(`${runId}:`.length);
+				if (path.includes("://")) continue;
+				result.push(val);
+			}
+			return result;
+		},
+		async getEntriesByPattern(runId, pattern) {
+			const result = [];
+			for (const [key, val] of entries) {
+				if (!key.startsWith(`${runId}:`)) continue;
+				const path = key.slice(`${runId}:`.length);
+				if (pattern !== "**" && pattern !== path) continue;
+				const idx = path.indexOf("://");
+				const scheme = idx === -1 ? null : path.slice(0, idx);
+				const tokens = Math.ceil((val.body || "").length / 4);
+				result.push({ ...val, scheme, tokens });
 			}
 			return result;
 		},
@@ -147,45 +164,66 @@ describe("FileScanner", () => {
 		assert.equal(store.entries.has("1:secret.env"), false);
 	});
 
-	it("sets active constraint files to visible visibility", async () => {
+	it("ingests `add` constraint files with default archived visibility", async () => {
 		writeFileSync(join(tmpDir, "main.js"), "export default {};");
 		const store = mockStore();
-		const db = mockDb(
-			[{ id: 1 }],
-			[{ pattern: "main.js", visibility: "active" }],
-		);
+		const db = mockDb([{ id: 1 }], [{ pattern: "main.js", visibility: "add" }]);
 		const scanner = new FileScanner(store, db, mockHooks());
 
 		await scanner.scan(tmpDir, 1, ["main.js"], 1);
-		assert.equal(store.entries.get("1:main.js").visibility, "visible");
+		assert.equal(store.entries.get("1:main.js").visibility, "archived");
 	});
 
-	it("writes repo://overview with project structure", async () => {
+	it("writes log://turn_0/manifest as a flat file list with token counts", async () => {
 		writeFileSync(join(tmpDir, "app.js"), "const x = 1;");
 		writeFileSync(join(tmpDir, "README.md"), "# hi");
 		const { mkdirSync } = await import("node:fs");
 		mkdirSync(join(tmpDir, "src"));
 		writeFileSync(join(tmpDir, "src/index.js"), "export {};");
-		writeFileSync(join(tmpDir, "src/utils.js"), "export {};");
 
 		const store = mockStore();
 		const scanner = new FileScanner(store, mockDb(), mockHooks());
 
-		await scanner.scan(
-			tmpDir,
-			1,
-			["app.js", "README.md", "src/index.js", "src/utils.js"],
-			1,
-		);
+		await scanner.scan(tmpDir, 1, ["app.js", "README.md", "src/index.js"], 1);
 
-		const overview = store.entries.get("1:repo://overview");
-		assert.ok(overview, "expected repo://overview entry");
-		assert.equal(overview.state, "resolved");
-		assert.equal(overview.visibility, "visible");
-		assert.ok(overview.body.includes("app.js"));
-		assert.ok(overview.body.includes("src/"));
-		assert.ok(overview.body.includes("2 files"));
-		assert.ok(overview.body.includes("Navigate"));
+		const manifest = store.entries.get("1:log://turn_0/manifest");
+		assert.ok(manifest, "expected log://turn_0/manifest entry");
+		assert.equal(manifest.state, "resolved");
+		assert.equal(manifest.visibility, "visible");
+		// Each line is `* <path> - N tokens`, files alphabetical by path
+		// under locale-aware comparison ("app.js" before "README.md").
+		const lines = manifest.body.split("\n");
+		assert.match(lines[0], /^\* app\.js - \d+ tokens$/);
+		assert.match(lines[1], /^\* README\.md - \d+ tokens$/);
+		assert.match(lines[2], /^\* src\/index\.js - \d+ tokens$/);
+		// No category headers, no constraints, no navigate, no absolute path.
+		assert.ok(!manifest.body.includes("##"));
+		assert.ok(!manifest.body.includes("Navigate"));
+		assert.ok(!manifest.body.includes("Constraints"));
+		assert.ok(!manifest.body.includes(tmpDir));
+	});
+
+	it("does not rewrite log://turn_0/manifest on subsequent scans", async () => {
+		writeFileSync(join(tmpDir, "a.js"), "const a = 1;");
+		const store = mockStore();
+		const scanner = new FileScanner(store, mockDb(), mockHooks());
+
+		await scanner.scan(tmpDir, 1, ["a.js"], 1);
+		const firstBody = store.entries.get("1:log://turn_0/manifest").body;
+
+		writeFileSync(join(tmpDir, "b.js"), "const b = 2;");
+		await scanner.scan(tmpDir, 1, ["a.js", "b.js"], 2);
+		const secondBody = store.entries.get("1:log://turn_0/manifest").body;
+
+		assert.equal(
+			firstBody,
+			secondBody,
+			"manifest is a turn-0 snapshot; later scans must not mutate it",
+		);
+		assert.ok(
+			!firstBody.includes("b.js"),
+			"manifest must not list files added after run start",
+		);
 	});
 
 	it("removes files deleted from disk via rm", async () => {

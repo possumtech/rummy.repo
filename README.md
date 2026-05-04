@@ -14,9 +14,9 @@ Every turn, this plugin:
 4. Writes file entries to the store with symbols attached as attributes
 5. Generates diffs for files that changed since the last scan
 6. Removes entries for files deleted from disk
-7. Writes a navigable `repo://overview` entry with the project structure
+7. Writes a one-shot `log://turn_0/manifest` entry listing every file with its token cost (turn 0 only)
 
-Files start at `"archived"` visibility -- a 5000-file repo doesn't dump its full content into context. The model navigates via `repo://overview` (always visible) and promotes files to `"summarized"` (symbol tree) or `"visible"` (full content) as needed. The plugin preserves the model's visibility choices across re-scans.
+Files start at `"archived"` visibility regardless of constraint type -- a 5000-file repo doesn't dump its full content into context. The model orients via `log://turn_0/manifest` (a flat path list with token costs, written once at turn 0 and never rewritten) and promotes files to `"summarized"` (symbol tree) or `"visible"` (full content) as needed. The plugin preserves the model's visibility choices across re-scans.
 
 ## Supported Languages
 

@@ -13,10 +13,7 @@ export default class RummyRepo {
 
     constructor(core) {
         this.#core = core;
-        core.registerScheme({ name: "repo", category: "data" });
         core.on("turn.started", this.#onTurnStarted.bind(this));
-        core.hooks.tools.onView("repo", fn, "visible");
-        core.hooks.tools.onView("repo", fn, "summarized");
         core.hooks.tools.onView("file", fn, "summarized");
     }
 }
@@ -33,12 +30,6 @@ The plugin stores `core` for access to `core.db`, `core.hooks`, and
 
 ## 2. Registration
 
-### `core.registerScheme({ name: "repo", category: "data" })`
-
-Registers a new `repo://` URI scheme for entries describing the project
-itself. Category `"data"` places it in the same projection family as
-files. `model_visible` defaults to 1.
-
 ### `core.on("turn.started", fn)`
 
 Fires every turn before context materialization. The plugin:
@@ -48,16 +39,6 @@ Fires every turn before context materialization. The plugin:
 3. Lazily creates a FileScanner (once per plugin lifetime)
 4. Opens a ProjectContext to enumerate git-tracked files
 5. Runs `scanner.scan()` to sync file entries with inline symbol extraction
-
-### `core.hooks.tools.onView("repo", fn, "visible")`
-
-Full view: returns `entry.body` as-is.
-
-### `core.hooks.tools.onView("repo", fn, "summarized")`
-
-Truncated view: first 12 lines of the overview body, with a truncation
-notice. Enough to read top-level structure without consuming full token
-budget. Promote to visible to see the full tree.
 
 ### `core.hooks.tools.onView("file", fn, "summarized")`
 
@@ -79,10 +60,11 @@ Handles both parsed and stringified attributes:
 
 ## 3. Visibility Model
 
-Files default to `"archived"` on first scan. A 5000-file repo doesn't
-dump 400K tokens into context before any work happens. The model
-navigates via the `repo://overview` entry (always visible) and promotes
-individual files to `"summarized"` or `"visible"` as needed.
+Files default to `"archived"` on first scan regardless of constraint
+type. A 5000-file repo doesn't dump 400K tokens into context before any
+work happens. The model orients via the `log://turn_0/manifest` entry
+(visible, written once per run) and promotes individual files to
+`"summarized"` or `"visible"` as needed.
 
 | Visibility | What the model sees |
 |------------|-------------------|
@@ -92,8 +74,9 @@ individual files to `"summarized"` or `"visible"` as needed.
 
 The model controls promotion/demotion via `<set visibility="..."/>`.
 The plugin preserves prior visibility on re-scan so the model's own
-changes aren't clobbered. Only `constraint === "active"` forces
-`"visible"`.
+changes aren't clobbered. Constraint type governs membership (`add`,
+`readonly`) and write permission (`readonly`); it does not force an
+initial visibility.
 
 ---
 
@@ -136,7 +119,7 @@ are extracted inline during the scan.
 **Per-scan flow:**
 
 1. Load active runs and file constraints from the database
-2. Include `active`-constrained files not in the git file list
+2. Include non-`ignore`-constrained files not in the git file list
 3. Stat all files concurrently (no content reads), skip `ignore`-constrained
 4. For each file with changed mtime: read content, compute SHA-256 hash
 5. Skip if hash matches stored hash (mtime changed but content didn't)
@@ -144,11 +127,13 @@ are extracted inline during the scan.
    `hooks.hedberg.generatePatch` and write a `set://` entry
 7. Extract symbols inline via antlrmap (ctags fallback queued)
 8. Write to store via `store.set()` with `state: "resolved"`,
-   visibility (`"visible"` for active, else preserve or `"archived"`),
+   visibility (preserve prior entry's visibility, else `"archived"`),
    and `writer: "plugin"`
 9. Batch ctags extraction for files antlrmap couldn't handle
 10. Remove entries for files deleted from disk via `store.rm()`
-11. Write `repo://overview` entry (always visible)
+11. On the first scan only, write `log://turn_0/manifest` (turn 0,
+    visible). Skipped on subsequent scans within the same run so the
+    turn-0 prefix stays bit-identical for cache stability.
 
 **Constraint matching** uses `hooks.hedberg.match` for pattern-based
 constraints (glob, regex, etc.) rather than exact string equality.
@@ -158,42 +143,34 @@ named arguments and `writer: "plugin"` attribution.
 
 ---
 
-## 5. repo://overview
+## 5. log://turn_0/manifest
 
-A navigable project map written after each sync. Lives at
-`repo://overview` with `visibility: "visible"`. Stays bounded
-regardless of repo size.
+A flat list of every project file with its token cost, written once per
+run at turn 0 with `visibility: "visible"`. Acts as the model's
+orientation map without dumping file contents.
 
 **Content:**
 
 ```
-# /path/to/project (N files)
-
-## Root files
-- package.json
-- README.md
-- ...
-
-## Directories
-- src/ — 42 files
-- test/ — 12 files
-- ...
-
-## Constraints
-- active: .env, config.js
-- readonly: LICENSE
-
-## Navigate
-- Skim a folder's symbols: <set path="dir/**" visibility="summarized"/>
-- Read a specific file: <get path="dir/file.ext"/>
-- List a folder's files: <get path="dir/" preview/>
-- Search across files: <get path="**" preview>keyword</get>
-- Demote when done: <set path="dir/**" visibility="archived"/>
+* package.json - 142 tokens
+* README.md - 287 tokens
+* src/index.js - 1024 tokens
+* src/utils.js - 533 tokens
+...
 ```
 
-Root files listed (up to 50), directories shown with file counts sorted
-by size, constraints listed if any exist. The navigation legend teaches
-the model how to explore.
+Lines are alphabetical by path (locale-aware). Each line shows the path
+and its token cost so the model can budget which files to promote to
+`"summarized"` or `"visible"`. There are no headers, directory rollups,
+constraint listings, navigation legend, or absolute paths — just the
+file list.
+
+**Idempotence.** The manifest is written only if no entry already
+exists at `log://turn_0/manifest`. Subsequent scans within the same run
+do not mutate it. This keeps the turn-0 prefix bit-identical for the
+run's lifetime so the prefix cache holds clean across every subsequent
+turn. A file added on turn 5 will appear in the per-file entries but
+will not be retroactively listed in the manifest.
 
 ---
 
@@ -278,8 +255,8 @@ class AnotherClass L25
 
 ```
 src/
-  rummy.repo.js        Plugin entry. Scheme registration, view handlers, turn.started.
-  FileScanner.js       File sync, inline symbol extraction, diff gen, repo://overview.
+  rummy.repo.js        Plugin entry. View handlers, turn.started listener.
+  FileScanner.js       File sync, inline symbol extraction, diff gen, log://turn_0/manifest.
   ProjectContext.js     Git-aware file enumeration. Caches by HEAD hash.
   GitProvider.js        CLI git first, isomorphic-git fallback. Lazy loaded.
   CtagsExtractor.js    Universal Ctags wrapper. Synchronous child process.
@@ -297,11 +274,12 @@ src/
 Tests use Node's built-in test runner (`node:test`) and assertion module
 (`node:assert/strict`). FileScanner tests use temp directories with mock
 store/db and verify inline symbol extraction, state/visibility values,
-constraint handling, repo://overview generation, and `writer`
-attribution. GitProvider and ProjectContext tests run against the real
-repo. Plugin tests verify scheme registration, view handlers (including
-truncation), guard clauses, and end-to-end scanning with symbol
-attachment via temp git repos created with isomorphic-git.
+constraint handling, `log://turn_0/manifest` generation and idempotence
+across re-scans, and `writer` attribution. GitProvider and ProjectContext
+tests run against the real repo. Plugin tests verify the absence of any
+`repo` scheme registration, the file-scheme summarized view handler,
+guard clauses, and end-to-end scanning with symbol attachment via temp
+git repos created with isomorphic-git.
 
 ```bash
 npm test              # lint + unit tests with coverage
