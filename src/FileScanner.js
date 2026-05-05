@@ -189,7 +189,7 @@ export default class FileScanner {
 			await this.#store.rm({ runId, path: relPath, writer: "plugin" });
 		}
 
-		// One-shot per-run project manifest at `log://turn_0/manifest`.
+		// One-shot per-run project manifest at `log://turn_0/repo/manifest`.
 		// Snapshot of all files with their token costs as of run start.
 		// Per-file entries (this loop above) carry current state across
 		// turns; the manifest is orientation, not authoritative state.
@@ -198,7 +198,7 @@ export default class FileScanner {
 		// cache holds clean across every subsequent turn.
 		const existingManifest = await this.#store.getEntriesByPattern(
 			runId,
-			"log://turn_0/manifest",
+			"log://turn_0/repo/manifest",
 			null,
 		);
 		if (existingManifest.length === 0) {
@@ -216,7 +216,7 @@ export default class FileScanner {
 			await this.#store.set({
 				runId,
 				turn: 0,
-				path: "log://turn_0/manifest",
+				path: "log://turn_0/repo/manifest",
 				body,
 				state: "resolved",
 				visibility: "visible",

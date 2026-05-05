@@ -15,6 +15,8 @@ export default class RummyRepo {
         this.#core = core;
         core.on("turn.started", this.#onTurnStarted.bind(this));
         core.hooks.tools.onView("file", fn, "summarized");
+        core.hooks.tools.onView("repo", fn, "visible");
+        core.hooks.tools.onView("repo", fn, "summarized");
     }
 }
 ```
@@ -56,13 +58,23 @@ Handles both parsed and stringified attributes:
 }
 ```
 
+### `core.hooks.tools.onView("repo", fn, "visible" | "summarized")`
+
+Registers projection views for the manifest entry at
+`log://turn_0/repo/manifest`. The first argument matches Rummy core's
+**action-segment dispatch** for log entries, not the URI scheme — see
+§5 for the full convention. Both visibility levels are pass-through
+(`(entry) => entry.body`); the manifest body is already model-ready
+prose. `summarized` is registered defensively so the manifest survives
+demotion without requiring a follow-up plugin change.
+
 ---
 
 ## 3. Visibility Model
 
 Files default to `"archived"` on first scan regardless of constraint
 type. A 5000-file repo doesn't dump 400K tokens into context before any
-work happens. The model orients via the `log://turn_0/manifest` entry
+work happens. The model orients via the `log://turn_0/repo/manifest` entry
 (visible, written once per run) and promotes individual files to
 `"summarized"` or `"visible"` as needed.
 
@@ -131,7 +143,7 @@ are extracted inline during the scan.
    and `writer: "plugin"`
 9. Batch ctags extraction for files antlrmap couldn't handle
 10. Remove entries for files deleted from disk via `store.rm()`
-11. On the first scan only, write `log://turn_0/manifest` (turn 0,
+11. On the first scan only, write `log://turn_0/repo/manifest` (turn 0,
     visible). Skipped on subsequent scans within the same run so the
     turn-0 prefix stays bit-identical for cache stability.
 
@@ -143,7 +155,7 @@ named arguments and `writer: "plugin"` attribution.
 
 ---
 
-## 5. log://turn_0/manifest
+## 5. log://turn_0/repo/manifest
 
 A flat list of every project file with its token cost, written once per
 run at turn 0 with `visibility: "visible"`. Acts as the model's
@@ -165,8 +177,21 @@ and its token cost so the model can budget which files to promote to
 constraint listings, navigation legend, or absolute paths — just the
 file list.
 
+**Path shape and view dispatch.** The path is
+`log://turn_N/<action>/<slug>` — Rummy's standard log-entry shape, where
+`<action>` is the projection-dispatch key. Rummy core's
+`materializeContext` extracts the action segment from log paths and
+looks up views under that name rather than the literal `log` scheme,
+so the plugin registers `core.hooks.tools.onView("repo", …)` to match.
+We deliberately don't register a `repo://` scheme: it would compete
+with the bare-path `file` scheme and attract accidental file-entry
+writes. Every entry that reaches `materializeContext` must have a
+visibility map registered for its projection key — `view()` throws on
+missing keys — so `onView("repo", …)` is required for `visible` and
+registered for `summarized` too as a defensive pass-through.
+
 **Idempotence.** The manifest is written only if no entry already
-exists at `log://turn_0/manifest`. Subsequent scans within the same run
+exists at `log://turn_0/repo/manifest`. Subsequent scans within the same run
 do not mutate it. This keeps the turn-0 prefix bit-identical for the
 run's lifetime so the prefix cache holds clean across every subsequent
 turn. A file added on turn 5 will appear in the per-file entries but
@@ -256,7 +281,7 @@ class AnotherClass L25
 ```
 src/
   rummy.repo.js        Plugin entry. View handlers, turn.started listener.
-  FileScanner.js       File sync, inline symbol extraction, diff gen, log://turn_0/manifest.
+  FileScanner.js       File sync, inline symbol extraction, diff gen, log://turn_0/repo/manifest.
   ProjectContext.js     Git-aware file enumeration. Caches by HEAD hash.
   GitProvider.js        CLI git first, isomorphic-git fallback. Lazy loaded.
   CtagsExtractor.js    Universal Ctags wrapper. Synchronous child process.
@@ -274,7 +299,7 @@ src/
 Tests use Node's built-in test runner (`node:test`) and assertion module
 (`node:assert/strict`). FileScanner tests use temp directories with mock
 store/db and verify inline symbol extraction, state/visibility values,
-constraint handling, `log://turn_0/manifest` generation and idempotence
+constraint handling, `log://turn_0/repo/manifest` generation and idempotence
 across re-scans, and `writer` attribution. GitProvider and ProjectContext
 tests run against the real repo. Plugin tests verify the absence of any
 `repo` scheme registration, the file-scheme summarized view handler,

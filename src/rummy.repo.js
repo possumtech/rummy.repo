@@ -20,6 +20,16 @@ export default class RummyRepo {
 			},
 			"summarized",
 		);
+
+		// `log://turn_0/repo/manifest`. materializeContext dispatches log
+		// entries by their action segment (the slug after `turn_N/`), so
+		// onView("repo", ...) matches the action, not a scheme. We
+		// deliberately don't register `repo://` as a public scheme —
+		// it would compete with the bare-path file scheme and attract
+		// accidental file-entry writes. Body is model-ready prose, so
+		// both projections pass through.
+		core.hooks.tools.onView("repo", (entry) => entry.body, "visible");
+		core.hooks.tools.onView("repo", (entry) => entry.body, "summarized");
 	}
 
 	async #onTurnStarted({ rummy }) {

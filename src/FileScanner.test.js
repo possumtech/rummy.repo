@@ -174,7 +174,7 @@ describe("FileScanner", () => {
 		assert.equal(store.entries.get("1:main.js").visibility, "archived");
 	});
 
-	it("writes log://turn_0/manifest as a flat file list with token counts", async () => {
+	it("writes log://turn_0/repo/manifest as a flat file list with token counts", async () => {
 		writeFileSync(join(tmpDir, "app.js"), "const x = 1;");
 		writeFileSync(join(tmpDir, "README.md"), "# hi");
 		const { mkdirSync } = await import("node:fs");
@@ -186,8 +186,8 @@ describe("FileScanner", () => {
 
 		await scanner.scan(tmpDir, 1, ["app.js", "README.md", "src/index.js"], 1);
 
-		const manifest = store.entries.get("1:log://turn_0/manifest");
-		assert.ok(manifest, "expected log://turn_0/manifest entry");
+		const manifest = store.entries.get("1:log://turn_0/repo/manifest");
+		assert.ok(manifest, "expected log://turn_0/repo/manifest entry");
 		assert.equal(manifest.state, "resolved");
 		assert.equal(manifest.visibility, "visible");
 		// Each line is `* <path> - N tokens`, files alphabetical by path
@@ -203,17 +203,17 @@ describe("FileScanner", () => {
 		assert.ok(!manifest.body.includes(tmpDir));
 	});
 
-	it("does not rewrite log://turn_0/manifest on subsequent scans", async () => {
+	it("does not rewrite log://turn_0/repo/manifest on subsequent scans", async () => {
 		writeFileSync(join(tmpDir, "a.js"), "const a = 1;");
 		const store = mockStore();
 		const scanner = new FileScanner(store, mockDb(), mockHooks());
 
 		await scanner.scan(tmpDir, 1, ["a.js"], 1);
-		const firstBody = store.entries.get("1:log://turn_0/manifest").body;
+		const firstBody = store.entries.get("1:log://turn_0/repo/manifest").body;
 
 		writeFileSync(join(tmpDir, "b.js"), "const b = 2;");
 		await scanner.scan(tmpDir, 1, ["a.js", "b.js"], 2);
-		const secondBody = store.entries.get("1:log://turn_0/manifest").body;
+		const secondBody = store.entries.get("1:log://turn_0/repo/manifest").body;
 
 		assert.equal(
 			firstBody,

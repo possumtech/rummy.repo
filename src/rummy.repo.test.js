@@ -19,6 +19,20 @@ function mockCore(dbOverride = null) {
 				onView(scheme, fn, visibility) {
 					this.views.push({ scheme, fn, visibility });
 				},
+				// Mirrors ToolRegistry.view (rummy core src/hooks/ToolRegistry.js):
+				// throw when no scheme registered; "" when scheme registered but
+				// the requested visibility isn't; normalize null/undefined to "".
+				async view(scheme, entry) {
+					const matches = this.views.filter((v) => v.scheme === scheme);
+					if (matches.length === 0) {
+						throw new Error(`No view registered for scheme '${scheme}'.`);
+					}
+					const visibility = entry.visibility ?? "visible";
+					const match = matches.find((v) => v.visibility === visibility);
+					if (!match) return "";
+					const result = await match.fn(entry);
+					return result == null ? "" : result;
+				},
 			},
 		},
 		registerScheme() {
@@ -100,7 +114,7 @@ function mockDb() {
 }
 
 describe("RummyRepo", () => {
-	it("does not register a repo scheme (project state lives at log://turn_0/manifest)", () => {
+	it("does not register a repo scheme (project state lives at log://turn_0/repo/manifest)", () => {
 		const schemes = [];
 		const core = mockCore();
 		core.registerScheme = (s) => schemes.push(s);
@@ -120,11 +134,25 @@ describe("RummyRepo", () => {
 		assert.equal(view.fn({ attributes: {} }), "");
 	});
 
-	it("does not register repo-scheme views", () => {
+	it("dispatches log://turn_N/repo/... bodies pass-through at both visibility levels", async () => {
 		const core = mockCore();
 		new RummyRepo(core);
-		const repoViews = core.hooks.tools.views.filter((v) => v.scheme === "repo");
-		assert.equal(repoViews.length, 0);
+
+		// materializeContext extracts "repo" as the projection key from
+		// `log://turn_N/repo/...` paths and looks up views under that
+		// name (not the literal `log` scheme). The manifest body is
+		// already model-ready prose, so both projections must round-
+		// trip it verbatim.
+		const body = "* app.js - 142 tokens\n* README.md - 287 tokens";
+
+		assert.equal(
+			await core.hooks.tools.view("repo", { body, visibility: "visible" }),
+			body,
+		);
+		assert.equal(
+			await core.hooks.tools.view("repo", { body, visibility: "summarized" }),
+			body,
+		);
 	});
 
 	it("registers turn.started listener on construction", () => {
