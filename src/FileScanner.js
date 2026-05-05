@@ -196,6 +196,17 @@ export default class FileScanner {
 		// Skipping the write when an entry already exists keeps the
 		// turn-0 path bit-identical for the run's lifetime — the prefix
 		// cache holds clean across every subsequent turn.
+		//
+		// Body shape — two sections joined by a markdown horizontal rule:
+		//   <directory rollup>           ← summarized projection slices here
+		//   \n\n---\n\n
+		//   <comprehensive flat list>    ← visible projection returns whole body
+		//
+		// Per-directory rollup gives the model an at-a-glance budget map;
+		// flat list lets it copy paths verbatim. Budget plugin demotes the
+		// entry to summarized when the visible body overflows ceiling, so
+		// the manifest scales with project size via the standard FVSM
+		// visibility apparatus, not bespoke truncation.
 		const existingManifest = await this.#store.getEntriesByPattern(
 			runId,
 			"log://turn_0/repo/manifest",
@@ -210,14 +221,11 @@ export default class FileScanner {
 			const files = fileEntries
 				.filter((e) => e.scheme == null)
 				.toSorted((a, b) => a.path.localeCompare(b.path));
-			const body = files
-				.map((f) => `* ${f.path} - ${f.tokens} tokens`)
-				.join("\n");
 			await this.#store.set({
 				runId,
 				turn: 0,
 				path: "log://turn_0/repo/manifest",
-				body,
+				body: buildManifestBody(files),
 				state: "resolved",
 				visibility: "visible",
 				writer: "plugin",
@@ -243,4 +251,39 @@ function matchConstraint(constraints, relPath, match) {
 		if (match(pattern, relPath)) return visibility;
 	}
 	return null;
+}
+
+// Manifest body: directory rollup + flat file list, joined by a markdown
+// horizontal rule. The summarized projection slices to the rollup; the
+// visible projection passes the whole body through. Files at the root
+// roll up under "./".
+export function buildManifestBody(files) {
+	const byDir = new Map();
+	for (const f of files) {
+		const idx = f.path.lastIndexOf("/");
+		const dir = idx === -1 ? "./" : `${f.path.slice(0, idx)}/`;
+		const e = byDir.get(dir) ?? { count: 0, tokens: 0 };
+		e.count += 1;
+		e.tokens += f.tokens;
+		byDir.set(dir, e);
+	}
+	const rollup = [...byDir.entries()]
+		.toSorted(([a], [b]) => a.localeCompare(b))
+		.map(
+			([dir, { count, tokens }]) =>
+				`* ${dir} - ${count} ${count === 1 ? "file" : "files"}, ${tokens} tokens`,
+		)
+		.join("\n");
+	const flat = files.map((f) => `* ${f.path} - ${f.tokens} tokens`).join("\n");
+	return `${rollup}\n\n---\n\n${flat}`;
+}
+
+// Summarized projection: everything before the markdown horizontal rule.
+// Writer contract — buildManifestBody always emits the delimiter — so a
+// missing delimiter is a contract violation, not a runtime case.
+export function summarizeManifest(body) {
+	const idx = body.indexOf("\n\n---\n\n");
+	if (idx === -1)
+		throw new Error("manifest body missing rollup/flat-list delimiter");
+	return body.slice(0, idx);
 }

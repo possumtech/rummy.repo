@@ -134,16 +134,19 @@ describe("RummyRepo", () => {
 		assert.equal(view.fn({ attributes: {} }), "");
 	});
 
-	it("dispatches log://turn_N/repo/... bodies pass-through at both visibility levels", async () => {
+	it("dispatches log://turn_N/repo/... — visible returns whole body, summarized returns rollup only", async () => {
 		const core = mockCore();
 		new RummyRepo(core);
 
 		// materializeContext extracts "repo" as the projection key from
 		// `log://turn_N/repo/...` paths and looks up views under that
-		// name (not the literal `log` scheme). The manifest body is
-		// already model-ready prose, so both projections must round-
-		// trip it verbatim.
-		const body = "* app.js - 142 tokens\n* README.md - 287 tokens";
+		// name (not the literal `log` scheme). Manifest body has two
+		// sections joined by `\n\n---\n\n`: directory rollup (summarized
+		// returns this), then comprehensive flat list (visible returns
+		// whole body).
+		const rollup = "* ./ - 2 files, 429 tokens";
+		const flat = "* app.js - 142 tokens\n* README.md - 287 tokens";
+		const body = `${rollup}\n\n---\n\n${flat}`;
 
 		assert.equal(
 			await core.hooks.tools.view("repo", { body, visibility: "visible" }),
@@ -151,7 +154,7 @@ describe("RummyRepo", () => {
 		);
 		assert.equal(
 			await core.hooks.tools.view("repo", { body, visibility: "summarized" }),
-			body,
+			rollup,
 		);
 	});
 

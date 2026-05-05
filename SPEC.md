@@ -157,25 +157,51 @@ named arguments and `writer: "plugin"` attribution.
 
 ## 5. log://turn_0/repo/manifest
 
-A flat list of every project file with its token cost, written once per
-run at turn 0 with `visibility: "visible"`. Acts as the model's
-orientation map without dumping file contents.
+The model's orientation map. Written once per run at turn 0 with
+`visibility: "visible"`. Body has two sections joined by a markdown
+horizontal rule; the visibility apparatus selects which the model
+sees.
 
 **Content:**
 
 ```
+* ./ - 2 files, 429 tokens
+* src/ - 2 files, 1557 tokens
+
+---
+
 * package.json - 142 tokens
 * README.md - 287 tokens
 * src/index.js - 1024 tokens
 * src/utils.js - 533 tokens
-...
 ```
 
-Lines are alphabetical by path (locale-aware). Each line shows the path
-and its token cost so the model can budget which files to promote to
-`"summarized"` or `"visible"`. There are no headers, directory rollups,
-constraint listings, navigation legend, or absolute paths — just the
-file list.
+The first section is the **directory rollup**: one line per
+directory that contains files, sorted alphabetically, with file
+count and token sum. Files at the project root roll up under `./`.
+
+The second section is the **comprehensive file list**: every file
+with its individual token cost, sorted alphabetically by path
+(locale-aware). Same shape as the per-file `* path - N tokens`
+lines used elsewhere — paste-amenable for the model copying paths
+into `<get>` / `<set>` calls.
+
+**Two projections:**
+
+- `visible` returns the whole body (rollup + flat list) so the
+  model has both directory-level orientation and file-level
+  pasteability in one render.
+- `summarized` returns the rollup only — the part before the
+  `\n\n---\n\n` delimiter. Same rollup that opens the visible
+  projection, on its own.
+
+When the visible body would push the dispatch packet over ceiling,
+the budget plugin's standard demotion path flips the manifest to
+`summarized`. The model still sees the directory map and can
+recover the full list with `<get path="log://turn_0/repo/manifest"/>`
+or scope its query with `<get path="src/**" manifest/>`. No bespoke
+truncation; size adapts via the same FVSM mechanism as every other
+oversized entry.
 
 **Path shape and view dispatch.** The path is
 `log://turn_N/<action>/<slug>` — Rummy's standard log-entry shape, where

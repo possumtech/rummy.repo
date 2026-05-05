@@ -1,4 +1,4 @@
-import FileScanner from "./FileScanner.js";
+import FileScanner, { summarizeManifest } from "./FileScanner.js";
 import ProjectContext from "./ProjectContext.js";
 
 export default class RummyRepo {
@@ -26,10 +26,20 @@ export default class RummyRepo {
 		// onView("repo", ...) matches the action, not a scheme. We
 		// deliberately don't register `repo://` as a public scheme —
 		// it would compete with the bare-path file scheme and attract
-		// accidental file-entry writes. Body is model-ready prose, so
-		// both projections pass through.
+		// accidental file-entry writes.
+		//
+		// Manifest body has two sections: directory rollup (summarized
+		// projection) + flat file list (visible projection). When the
+		// budget plugin demotes the manifest under context pressure,
+		// the model gets the rollup — same shape, smaller cost. The
+		// model can promote back via `<get path="log://turn_0/repo/manifest"/>`
+		// to recover the comprehensive list.
 		core.hooks.tools.onView("repo", (entry) => entry.body, "visible");
-		core.hooks.tools.onView("repo", (entry) => entry.body, "summarized");
+		core.hooks.tools.onView(
+			"repo",
+			(entry) => summarizeManifest(entry.body),
+			"summarized",
+		);
 	}
 
 	async #onTurnStarted({ rummy }) {

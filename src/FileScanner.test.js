@@ -174,7 +174,7 @@ describe("FileScanner", () => {
 		assert.equal(store.entries.get("1:main.js").visibility, "archived");
 	});
 
-	it("writes log://turn_0/repo/manifest as a flat file list with token counts", async () => {
+	it("writes log://turn_0/repo/manifest with directory rollup + flat file list", async () => {
 		writeFileSync(join(tmpDir, "app.js"), "const x = 1;");
 		writeFileSync(join(tmpDir, "README.md"), "# hi");
 		const { mkdirSync } = await import("node:fs");
@@ -190,12 +190,25 @@ describe("FileScanner", () => {
 		assert.ok(manifest, "expected log://turn_0/repo/manifest entry");
 		assert.equal(manifest.state, "resolved");
 		assert.equal(manifest.visibility, "visible");
-		// Each line is `* <path> - N tokens`, files alphabetical by path
-		// under locale-aware comparison ("app.js" before "README.md").
-		const lines = manifest.body.split("\n");
-		assert.match(lines[0], /^\* app\.js - \d+ tokens$/);
-		assert.match(lines[1], /^\* README\.md - \d+ tokens$/);
-		assert.match(lines[2], /^\* src\/index\.js - \d+ tokens$/);
+
+		// Body shape: rollup section, delimiter, flat list section.
+		const idx = manifest.body.indexOf("\n\n---\n\n");
+		assert.ok(idx > 0, "body has the rollup/flat-list delimiter");
+		const rollup = manifest.body.slice(0, idx);
+		const flat = manifest.body.slice(idx + "\n\n---\n\n".length);
+
+		// Rollup: one line per directory, alphabetical, with file count + token sum.
+		// Root files roll up under "./"; src/ holds index.js.
+		const rollupLines = rollup.split("\n");
+		assert.match(rollupLines[0], /^\* \.\/ - 2 files, \d+ tokens$/);
+		assert.match(rollupLines[1], /^\* src\/ - 1 file, \d+ tokens$/);
+
+		// Flat list: every file with its token cost, alphabetical by path.
+		const flatLines = flat.split("\n");
+		assert.match(flatLines[0], /^\* app\.js - \d+ tokens$/);
+		assert.match(flatLines[1], /^\* README\.md - \d+ tokens$/);
+		assert.match(flatLines[2], /^\* src\/index\.js - \d+ tokens$/);
+
 		// No category headers, no constraints, no navigate, no absolute path.
 		assert.ok(!manifest.body.includes("##"));
 		assert.ok(!manifest.body.includes("Navigate"));
