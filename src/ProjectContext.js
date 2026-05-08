@@ -1,54 +1,8 @@
-import fs from "node:fs/promises";
 import { isAbsolute, join, relative } from "node:path";
 import GitProvider from "./GitProvider.js";
 
 // Cache: path → { headHash, context } — git-mode only.
 const cache = new Map();
-
-// Directories never worth walking. Pruned at directory boundary so
-// their contents don't get stat'd. .git is structural; node_modules
-// is vendored bloat; dist/build/out/target are common build outputs.
-// Any leading-dot directory (.venv, .cache, .pytest_cache, .idea,
-// .vscode) is also pruned — these are tooling state, not project
-// source.
-const EXCLUDED_DIRS = new Set([
-	".git",
-	"node_modules",
-	"dist",
-	"build",
-	"out",
-	"target",
-]);
-
-function isExcludedDir(name) {
-	return EXCLUDED_DIRS.has(name) || name.startsWith(".");
-}
-
-// Walk the filesystem from `root`, returning a Set of file paths
-// relative to `root`. Symlinks are skipped (not followed). Used as
-// the no-git fallback for project discovery — a non-git project is
-// still a project. Excludes mirror the spirit of `git ls-files`
-// minus the explicit tracking: source over vendored/build/state.
-async function fsWalk(root) {
-	const tracked = new Set();
-	await walkDir(root, "", tracked);
-	return tracked;
-}
-
-async function walkDir(absDir, relDir, tracked) {
-	const dirents = await fs.readdir(absDir, { withFileTypes: true });
-	for (const dirent of dirents) {
-		const name = dirent.name;
-		if (dirent.isSymbolicLink()) continue;
-		const childRel = relDir ? `${relDir}/${name}` : name;
-		if (dirent.isDirectory()) {
-			if (isExcludedDir(name)) continue;
-			await walkDir(join(absDir, name), childRel, tracked);
-		} else if (dirent.isFile()) {
-			tracked.add(childRel);
-		}
-	}
-}
 
 export default class ProjectContext {
 	#root;
@@ -67,9 +21,7 @@ export default class ProjectContext {
 		const detectedRoot = await GitProvider.detectRoot(path);
 		const isGit = detectedRoot !== null;
 
-		// Reuse cached context if HEAD hasn't changed (git only — fs-walk
-		// invalidation is a function of every file mtime, not worth the
-		// bookkeeping until performance demands it).
+		// Reuse cached context if HEAD hasn't changed.
 		if (isGit) {
 			const headHash = await GitProvider.getHeadHash(detectedRoot);
 			const cached = cache.get(path);
@@ -91,8 +43,10 @@ export default class ProjectContext {
 			return new ProjectContext(path, true, trackedFiles, dbFiles);
 		}
 
-		const trackedFiles = await fsWalk(path);
-		return new ProjectContext(path, false, trackedFiles, dbFiles);
+		// Non-git: membership = override-additions only. No fs-walk
+		// fallback. See SPEC.md §3.1 for the full membership formula
+		// and the list of forbidden mechanisms.
+		return new ProjectContext(path, false, new Set(), dbFiles);
 	}
 
 	async isInProject(relPath) {
