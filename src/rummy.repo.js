@@ -1,4 +1,4 @@
-import FileScanner, { summarizeManifest } from "./FileScanner.js";
+import FileScanner from "./FileScanner.js";
 import ProjectContext from "./ProjectContext.js";
 
 export default class RummyRepo {
@@ -9,37 +9,33 @@ export default class RummyRepo {
 		this.#core = core;
 		core.on("turn.started", this.#onTurnStarted.bind(this));
 
-		core.hooks.tools.onView(
-			"file",
-			(entry) => {
-				const attrs =
-					typeof entry.attributes === "string"
-						? JSON.parse(entry.attributes)
-						: entry.attributes;
-				return attrs?.symbols || "";
-			},
-			"summarized",
-		);
+		// `repo` scheme owns the project-level manifest entry (`repo://manifest`).
+		// Catalog data so it lands in <index> alongside files and knowns.
+		// Plugin-only: the manifest is engine-maintained orientation; model
+		// writes to repo:// raise PermissionError and strike.
+		core.registerScheme({
+			name: "repo",
+			category: "data",
+			writableBy: ["plugin"],
+		});
 
-		// `log://turn_0/repo/manifest`. materializeContext dispatches log
-		// entries by their action segment (the slug after `turn_N/`), so
-		// onView("repo", ...) matches the action, not a scheme. We
-		// deliberately don't register `repo://` as a public scheme —
-		// it would compete with the bare-path file scheme and attract
-		// accidental file-entry writes.
-		//
-		// Manifest body has two sections: directory rollup (summarized
-		// projection) + flat file list (visible projection). When the
-		// budget plugin demotes the manifest under context pressure,
-		// the model gets the rollup — same shape, smaller cost. The
-		// model can promote back via `<get path="log://turn_0/repo/manifest"/>`
-		// to recover the comprehensive list.
-		core.hooks.tools.onView("repo", (entry) => entry.body, "visible");
-		core.hooks.tools.onView(
-			"repo",
-			(entry) => summarizeManifest(entry.body),
-			"summarized",
-		);
+		// file tile in <index>: symbols if rummy.repo extracted any
+		// (compact code outline); empty otherwise (envelope only — path
+		// + token count). <index> is a catalog, not a content dump;
+		// model retrieves the full body via `<get path=...>` which
+		// reads entry.body directly and bypasses this view hook.
+		core.hooks.tools.onView("file", (entry) => {
+			const attrs =
+				typeof entry.attributes === "string"
+					? JSON.parse(entry.attributes)
+					: entry.attributes;
+			return attrs?.symbols ?? "";
+		});
+		// repo://manifest tile renders empty body in <index> — envelope
+		// only. The full inventory is the compaction lifeline,
+		// retrieved via `<get repo://manifest>` which reads entry.body
+		// directly and bypasses this view hook.
+		core.hooks.tools.onView("repo", () => "");
 	}
 
 	async #onTurnStarted({ rummy }) {

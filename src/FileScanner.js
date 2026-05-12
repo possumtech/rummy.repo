@@ -94,6 +94,24 @@ export default class FileScanner {
 		const fileKeys = new Map();
 		for (const entry of existing) fileKeys.set(entry.path, entry);
 
+		// Initial scan = bootstrap, not a delta. When the run has zero
+		// prior file entries, every file on disk is "new" to the entry
+		// store but none of them are deltas from the model's perspective
+		// — the project state is the baseline. Synthesizing a NEW-file
+		// log entry per file would dump the entire project into <log>
+		// on turn 1 and blow the budget. Skip injection in this case;
+		// subsequent scans (existing.length > 0) inject for real deltas.
+		const isBootstrap = existing.length === 0;
+
+		// Loop scope for synthesizing log entries that surface external
+		// filesystem mutations back to the model. Per-loop turn counters
+		// (log://<L>/<T>/<S>/...) need a loop_id; if there isn't an
+		// active loop yet (run hasn't dispatched its first turn), the
+		// scan still happens but log injection is skipped — the file
+		// entries themselves carry the freshest state.
+		const loop = await this.#db.get_current_loop.get({ run_id: runId });
+		const loopId = loop?.id ?? null;
+
 		const ctagsQueue = [];
 
 		for (const [relPath, { mtime, fullPath }] of diskStats) {
@@ -114,20 +132,45 @@ export default class FileScanner {
 			const hash = hashContent(content);
 			if (entry?.hash === hash) continue;
 
-			if (entry?.body && this.#hooks?.hedberg?.generatePatch) {
-				const diff = this.#hooks.hedberg.generatePatch(
-					relPath,
-					entry.body,
+			// Engine-injected log entry surfacing the external change in
+			// the model's own edit grammar (SEARCH/REPLACE, marker.js
+			// shape) for the log body. attrs.patch carries the udiff
+			// for client renderers (rummy.nvim). attrs.external=true
+			// distinguishes engine injection from model authorship.
+			// Fires for both first-appearance (empty SEARCH, full
+			// REPLACE) and modification (one S/R pair per diff hunk).
+			if (
+				!isBootstrap &&
+				loopId !== null &&
+				this.#hooks?.hedberg?.generateSearchReplaceBody
+			) {
+				const before = entry?.body ?? "";
+				const body = this.#hooks.hedberg.generateSearchReplaceBody(
+					before,
 					content,
 				);
-				if (diff) {
+				if (body) {
+					const logPath = await this.#store.logPath(
+						runId,
+						loopId,
+						currentTurn,
+						"set",
+					);
+					const patch = this.#hooks.hedberg.generatePatch
+						? this.#hooks.hedberg.generatePatch(relPath, before, content)
+						: null;
 					await this.#store.set({
 						runId,
+						loopId,
 						turn: currentTurn,
-						path: `set://${relPath}`,
-						body: diff,
+						path: logPath,
+						body,
 						state: "resolved",
-						attributes: { path: relPath, external: true },
+						attributes: {
+							path: relPath,
+							external: true,
+							...(patch ? { patch } : {}),
+						},
 						writer: "plugin",
 					});
 				}
@@ -138,14 +181,14 @@ export default class FileScanner {
 				relPath,
 				this.#hooks.hedberg.match,
 			);
-			// All constraint types ingest the file with default
-			// visibility="archived"; the model promotes via <get> /
-			// <set visibility=...>. Constraint type governs membership
-			// (add/readonly) and write permission (readonly), not
-			// initial in-context visibility. Preserve any existing
-			// entry visibility on re-scan so the model's own
-			// promote/demote isn't clobbered.
-			const visibility = entry?.visibility || "archived";
+			// Files are the primary inventory; default visibility is
+			// `indexed` so each file renders as a symbol-bearing tile
+			// in `<index>` at run init. `repo://manifest` is the
+			// compaction lifeline when the indexed tile set
+			// overshoots ceiling (see SPEC §turn_zero_budget_gate).
+			// Preserve any existing entry visibility on re-scan so
+			// the model's own promote/demote isn't clobbered.
+			const visibility = entry?.visibility || "indexed";
 
 			const attributes = {
 				constraint,
@@ -160,6 +203,7 @@ export default class FileScanner {
 
 			await this.#store.set({
 				runId,
+				loopId,
 				turn: currentTurn,
 				path: relPath,
 				body: content,
@@ -178,6 +222,8 @@ export default class FileScanner {
 				if (symbols.length === 0) continue;
 				await this.#store.set({
 					runId,
+					loopId,
+					turn: currentTurn,
 					path,
 					attributes: { symbols: formatSymbols(symbols) },
 					writer: "plugin",
@@ -186,51 +232,64 @@ export default class FileScanner {
 		}
 
 		for (const [relPath] of fileKeys) {
+			// Symmetric to the set-log injection above: surface the
+			// disk-side delete as an engine-injected <rm> log entry
+			// (model's grammar for removal) so the model sees state it
+			// didn't author. attrs.external=true; empty body. Then the
+			// actual entry removal runs.
+			if (loopId !== null) {
+				const logPath = await this.#store.logPath(
+					runId,
+					loopId,
+					currentTurn,
+					"rm",
+				);
+				await this.#store.set({
+					runId,
+					loopId,
+					turn: currentTurn,
+					path: logPath,
+					body: "",
+					state: "resolved",
+					attributes: { path: relPath, external: true },
+					writer: "plugin",
+				});
+			}
 			await this.#store.rm({ runId, path: relPath, writer: "plugin" });
 		}
 
-		// One-shot per-run project manifest at `log://turn_0/repo/manifest`.
-		// Snapshot of all files with their token costs as of run start.
-		// Per-file entries (this loop above) carry current state across
-		// turns; the manifest is orientation, not authoritative state.
-		// Skipping the write when an entry already exists keeps the
-		// turn-0 path bit-identical for the run's lifetime — the prefix
-		// cache holds clean across every subsequent turn.
+		// Project manifest at `repo://manifest`. Refreshed every scan so
+		// files added or removed during the run become visible to the
+		// model on next loop start. Per-file entries (loop above) carry
+		// current content; the manifest is the orientation catalog.
 		//
-		// Body shape — two sections joined by a markdown horizontal rule:
-		//   <directory rollup>           ← summarized projection slices here
-		//   \n\n---\n\n
-		//   <comprehensive flat list>    ← visible projection returns whole body
-		//
-		// Per-directory rollup gives the model an at-a-glance budget map;
-		// flat list lets it copy paths verbatim. Budget plugin demotes the
-		// entry to summarized when the visible body overflows ceiling, so
-		// the manifest scales with project size via the standard FVSM
-		// visibility apparatus, not bespoke truncation.
-		const existingManifest = await this.#store.getEntriesByPattern(
+		// Body shape: canonical JSON-per-row — `{"path":"...","tokens":N}`.
+		// Directory rollup rows first (path ends in `/`), per-file rows
+		// after. One list, one format, no separators.
+		const fileEntries = await this.#store.getEntriesByPattern(
 			runId,
-			"log://turn_0/repo/manifest",
+			"**",
 			null,
 		);
-		if (existingManifest.length === 0) {
-			const fileEntries = await this.#store.getEntriesByPattern(
-				runId,
-				"**",
-				null,
-			);
-			const files = fileEntries
-				.filter((e) => e.scheme == null)
-				.toSorted((a, b) => a.path.localeCompare(b.path));
-			await this.#store.set({
-				runId,
-				turn: 0,
-				path: "log://turn_0/repo/manifest",
-				body: buildManifestBody(files),
-				state: "resolved",
-				visibility: "visible",
-				writer: "plugin",
-			});
-		}
+		const files = fileEntries
+			.filter((e) => e.scheme == null)
+			.toSorted((a, b) => a.path.localeCompare(b.path));
+		// Manifest write requires loopId (schema NOT NULL). When the
+		// run hasn't dispatched its first turn yet, there's no active
+		// loop — skip; the next scan (during loop 1's first turn) will
+		// write the manifest then. File entries themselves carry their
+		// own loopId; this skip only defers the manifest tile.
+		if (loopId == null) return;
+		await this.#store.set({
+			runId,
+			loopId,
+			turn: 0,
+			path: "repo://manifest",
+			body: buildManifestBody(files),
+			state: "resolved",
+			visibility: "indexed",
+			writer: "plugin",
+		});
 	}
 
 	async #extractAntlrSymbols(relPath, content) {
@@ -253,10 +312,12 @@ function matchConstraint(constraints, relPath, match) {
 	return null;
 }
 
-// Manifest body: directory rollup + flat file list, joined by a markdown
-// horizontal rule. The summarized projection slices to the rollup; the
-// visible projection passes the whole body through. Files at the root
-// roll up under "./".
+// Manifest body: directory rollup + flat file list as JSON-per-row.
+// Rollup rows have paths ending in `/` (e.g., `src/`, `./`); per-file
+// rows carry `lines` (file body line count) alongside `tokens` so the
+// model can plan `<get lineFirst=… lineFinal=…/>` partial reads
+// without computing the denominator. Rollup rows aggregate tokens but
+// not lines (line count across heterogeneous files isn't meaningful).
 export function buildManifestBody(files) {
 	const byDir = new Map();
 	for (const f of files) {
@@ -269,21 +330,19 @@ export function buildManifestBody(files) {
 	}
 	const rollup = [...byDir.entries()]
 		.toSorted(([a], [b]) => a.localeCompare(b))
-		.map(
-			([dir, { count, tokens }]) =>
-				`* ${dir} - ${count} ${count === 1 ? "file" : "files"}, ${tokens} tokens`,
-		)
-		.join("\n");
-	const flat = files.map((f) => `* ${f.path} - ${f.tokens} tokens`).join("\n");
-	return `${rollup}\n\n---\n\n${flat}`;
+		.map(([path, { tokens }]) => JSON.stringify({ path, tokens }));
+	const flat = files.map((f) => {
+		const lines = countLines(f.body);
+		return lines
+			? JSON.stringify({ path: f.path, tokens: f.tokens, lines })
+			: JSON.stringify({ path: f.path, tokens: f.tokens });
+	});
+	return [...rollup, ...flat].join("\n");
 }
 
-// Summarized projection: everything before the markdown horizontal rule.
-// Writer contract — buildManifestBody always emits the delimiter — so a
-// missing delimiter is a contract violation, not a runtime case.
-export function summarizeManifest(body) {
-	const idx = body.indexOf("\n\n---\n\n");
-	if (idx === -1)
-		throw new Error("manifest body missing rollup/flat-list delimiter");
-	return body.slice(0, idx);
+function countLines(text) {
+	if (typeof text !== "string" || text === "") return 0;
+	return text.endsWith("\n")
+		? text.split("\n").length - 1
+		: text.split("\n").length;
 }

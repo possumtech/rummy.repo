@@ -8,6 +8,7 @@ import FileScanner from "./FileScanner.js";
 function mockStore() {
 	const entries = new Map();
 	const writes = [];
+	let nextSeq = 0;
 	return {
 		writes,
 		async set(args) {
@@ -33,6 +34,10 @@ function mockStore() {
 		async rm({ runId, path }) {
 			writes.push({ op: "rm", runId, path });
 			entries.delete(`${runId}:${path}`);
+		},
+		async logPath(_runId, _loopId, turn, action) {
+			nextSeq += 1;
+			return `log://1/${turn}/${nextSeq}/${action}`;
 		},
 		async getFileEntries(runId) {
 			// Mirrors the real SQL: only bare-path (scheme IS NULL) entries.
@@ -65,7 +70,11 @@ function mockStore() {
 	};
 }
 
-function mockDb(activeRuns = [{ id: 1 }], constraints = []) {
+function mockDb(
+	activeRuns = [{ id: 1 }],
+	constraints = [],
+	currentLoop = { id: 42 },
+) {
 	return {
 		get_active_runs: {
 			all: async () => activeRuns,
@@ -76,6 +85,9 @@ function mockDb(activeRuns = [{ id: 1 }], constraints = []) {
 		get_entry_state: {
 			get: async () => null,
 		},
+		get_current_loop: {
+			get: async () => currentLoop,
+		},
 	};
 }
 
@@ -83,6 +95,14 @@ function mockHooks() {
 	return {
 		hedberg: {
 			match: (pattern, str) => pattern === str,
+			generatePatch: () => "udiff-stub",
+			generateSearchReplaceBody: (before, after) => {
+				if (before === after) return "";
+				if (before === "") {
+					return `<<SEARCH\nSEARCH<<REPLACE\n${after}\nREPLACE`;
+				}
+				return `<<SEARCH\n${before}\nSEARCH<<REPLACE\n${after}\nREPLACE`;
+			},
 		},
 	};
 }
@@ -109,7 +129,7 @@ describe("FileScanner", () => {
 		assert.ok(entry);
 		assert.equal(entry.body, "const x = 1;");
 		assert.equal(entry.state, "resolved");
-		assert.equal(entry.visibility, "archived");
+		assert.equal(entry.visibility, "indexed");
 		assert.equal(entry.writer, "plugin");
 	});
 
@@ -164,17 +184,20 @@ describe("FileScanner", () => {
 		assert.equal(store.entries.has("1:secret.env"), false);
 	});
 
-	it("ingests `add` constraint files with default archived visibility", async () => {
+	it("ingests `add` constraint files with default indexed visibility", async () => {
 		writeFileSync(join(tmpDir, "main.js"), "export default {};");
 		const store = mockStore();
 		const db = mockDb([{ id: 1 }], [{ pattern: "main.js", visibility: "add" }]);
 		const scanner = new FileScanner(store, db, mockHooks());
 
 		await scanner.scan(tmpDir, 1, ["main.js"], 1);
-		assert.equal(store.entries.get("1:main.js").visibility, "archived");
+		// Files default to indexed — each file becomes its own catalog
+		// tile in <index>. Tile body renders symbols (or empty if no
+		// symbols extracted); full body retrieved via <get>.
+		assert.equal(store.entries.get("1:main.js").visibility, "indexed");
 	});
 
-	it("writes log://turn_0/repo/manifest with directory rollup + flat file list", async () => {
+	it("writes repo://manifest with directory rollup + flat file list", async () => {
 		writeFileSync(join(tmpDir, "app.js"), "const x = 1;");
 		writeFileSync(join(tmpDir, "README.md"), "# hi");
 		const { mkdirSync } = await import("node:fs");
@@ -186,28 +209,27 @@ describe("FileScanner", () => {
 
 		await scanner.scan(tmpDir, 1, ["app.js", "README.md", "src/index.js"], 1);
 
-		const manifest = store.entries.get("1:log://turn_0/repo/manifest");
-		assert.ok(manifest, "expected log://turn_0/repo/manifest entry");
+		const manifest = store.entries.get("1:repo://manifest");
+		assert.ok(manifest, "expected repo://manifest entry");
 		assert.equal(manifest.state, "resolved");
-		assert.equal(manifest.visibility, "visible");
+		assert.equal(manifest.visibility, "indexed");
 
-		// Body shape: rollup section, delimiter, flat list section.
-		const idx = manifest.body.indexOf("\n\n---\n\n");
-		assert.ok(idx > 0, "body has the rollup/flat-list delimiter");
-		const rollup = manifest.body.slice(0, idx);
-		const flat = manifest.body.slice(idx + "\n\n---\n\n".length);
+		// Body shape: canonical JSON-per-row. Rollup rows first (paths
+		// ending in `/`), per-file rows after. No separator.
+		const lines = manifest.body.split("\n");
+		assert.ok(!manifest.body.includes("---"), "no separator line");
 
-		// Rollup: one line per directory, alphabetical, with file count + token sum.
-		// Root files roll up under "./"; src/ holds index.js.
-		const rollupLines = rollup.split("\n");
-		assert.match(rollupLines[0], /^\* \.\/ - 2 files, \d+ tokens$/);
-		assert.match(rollupLines[1], /^\* src\/ - 1 file, \d+ tokens$/);
+		// Rollup: one JSON row per directory, alphabetical, path + tokens
+		// (token sum). Root files roll up under "./"; src/ holds index.js.
+		assert.deepEqual({ path: JSON.parse(lines[0]).path }, { path: "./" });
+		assert.equal(typeof JSON.parse(lines[0]).tokens, "number");
+		assert.deepEqual({ path: JSON.parse(lines[1]).path }, { path: "src/" });
+		assert.equal(typeof JSON.parse(lines[1]).tokens, "number");
 
-		// Flat list: every file with its token cost, alphabetical by path.
-		const flatLines = flat.split("\n");
-		assert.match(flatLines[0], /^\* app\.js - \d+ tokens$/);
-		assert.match(flatLines[1], /^\* README\.md - \d+ tokens$/);
-		assert.match(flatLines[2], /^\* src\/index\.js - \d+ tokens$/);
+		// Flat list: one JSON row per file, alphabetical by path.
+		assert.equal(JSON.parse(lines[2]).path, "app.js");
+		assert.equal(JSON.parse(lines[3]).path, "README.md");
+		assert.equal(JSON.parse(lines[4]).path, "src/index.js");
 
 		// No category headers, no constraints, no navigate, no absolute path.
 		assert.ok(!manifest.body.includes("##"));
@@ -216,26 +238,23 @@ describe("FileScanner", () => {
 		assert.ok(!manifest.body.includes(tmpDir));
 	});
 
-	it("does not rewrite log://turn_0/repo/manifest on subsequent scans", async () => {
+	it("refreshes repo://manifest on subsequent scans", async () => {
 		writeFileSync(join(tmpDir, "a.js"), "const a = 1;");
 		const store = mockStore();
 		const scanner = new FileScanner(store, mockDb(), mockHooks());
 
 		await scanner.scan(tmpDir, 1, ["a.js"], 1);
-		const firstBody = store.entries.get("1:log://turn_0/repo/manifest").body;
+		const firstBody = store.entries.get("1:repo://manifest").body;
+		assert.ok(firstBody.includes("a.js"));
+		assert.ok(!firstBody.includes("b.js"));
 
 		writeFileSync(join(tmpDir, "b.js"), "const b = 2;");
 		await scanner.scan(tmpDir, 1, ["a.js", "b.js"], 2);
-		const secondBody = store.entries.get("1:log://turn_0/repo/manifest").body;
+		const secondBody = store.entries.get("1:repo://manifest").body;
 
-		assert.equal(
-			firstBody,
-			secondBody,
-			"manifest is a turn-0 snapshot; later scans must not mutate it",
-		);
 		assert.ok(
-			!firstBody.includes("b.js"),
-			"manifest must not list files added after run start",
+			secondBody.includes("b.js"),
+			"manifest must list files added after run start",
 		);
 	});
 
@@ -260,5 +279,171 @@ describe("FileScanner", () => {
 		assert.ok(rmCall);
 		assert.equal(rmCall.path, "gone.js");
 		assert.equal(rmCall.runId, 1);
+	});
+
+	// Phase 3 of the index/archive refactor: every engine-mediated
+	// file mutation surfaces as a synthetic log entry in the model's
+	// native edit grammar (set with SEARCH/REPLACE, or rm). attrs.patch
+	// carries the udiff for client renderers; attrs.external=true flags
+	// engine authorship.
+	describe("external mutation log injection (Phase 3)", () => {
+		it("new file on disk: writes a log://*/<turn>/*/set entry with empty-SEARCH body", async () => {
+			// "NEW file" semantically means "appeared between scans" —
+			// not "everything is new at bootstrap." Seed the store with
+			// at least one prior file entry so the run has a baseline,
+			// then create a NEW file on disk between scans.
+			const store = mockStore();
+			await store.set({
+				runId: 1,
+				turn: 0,
+				path: "baseline.md",
+				body: "baseline",
+				state: "resolved",
+				visibility: "archived",
+				hash: "base",
+				writer: "plugin",
+			});
+
+			writeFileSync(join(tmpDir, "fresh.md"), "hello\n");
+			const scanner = new FileScanner(store, mockDb(), mockHooks());
+
+			await scanner.scan(tmpDir, 1, ["fresh.md"], 5);
+
+			const logWrite = store.writes.find(
+				(w) =>
+					w.op === "set" &&
+					typeof w.path === "string" &&
+					/^log:\/\/\d+\/5\/\d+\/set$/.test(w.path),
+			);
+			assert.ok(logWrite, "log://.../set entry written");
+			assert.match(logWrite.body, /^<<SEARCH\nSEARCH<<REPLACE/);
+			assert.match(logWrite.body, /hello/);
+			assert.equal(logWrite.attributes.path, "fresh.md");
+			assert.equal(logWrite.attributes.external, true);
+			assert.equal(logWrite.attributes.patch, "udiff-stub");
+		});
+
+		it("bootstrap scan (zero prior file entries): no log injection — every file is baseline, not delta", async () => {
+			// Without this guard, the initial scan synthesizes a NEW-file
+			// log entry for every file in the project — N×fullbody tokens
+			// dumped into <log> on turn 1, blowing the budget on any
+			// non-trivial repo. The project's baseline state is captured
+			// in the file entries themselves; <log> stays clean.
+			writeFileSync(join(tmpDir, "a.md"), "alpha\n");
+			writeFileSync(join(tmpDir, "b.md"), "beta\n");
+			const store = mockStore();
+			const scanner = new FileScanner(store, mockDb(), mockHooks());
+
+			await scanner.scan(tmpDir, 1, ["a.md", "b.md"], 1);
+
+			const logWrites = store.writes.filter(
+				(w) =>
+					w.op === "set" &&
+					typeof w.path === "string" &&
+					w.path.startsWith("log://"),
+			);
+			assert.equal(
+				logWrites.length,
+				0,
+				"no log entries injected during bootstrap scan",
+			);
+			// Both files still land as bare file entries.
+			assert.ok(store.entries.has("1:a.md"));
+			assert.ok(store.entries.has("1:b.md"));
+		});
+
+		it("modified file on disk: writes a log://*/<turn>/*/set with SEARCH/REPLACE pair", async () => {
+			const store = mockStore();
+			await store.set({
+				runId: 1,
+				turn: 0,
+				path: "edit_me.md",
+				body: "old\n",
+				state: "resolved",
+				visibility: "archived",
+				hash: "stale",
+				writer: "plugin",
+			});
+
+			writeFileSync(join(tmpDir, "edit_me.md"), "new\n");
+			const scanner = new FileScanner(store, mockDb(), mockHooks());
+			await scanner.scan(tmpDir, 1, ["edit_me.md"], 5);
+
+			const logWrite = store.writes.find(
+				(w) =>
+					w.op === "set" &&
+					typeof w.path === "string" &&
+					/^log:\/\/\d+\/5\/\d+\/set$/.test(w.path),
+			);
+			assert.ok(logWrite, "log://.../set entry written");
+			assert.match(logWrite.body, /<<SEARCH\nold\n/);
+			assert.match(logWrite.body, /SEARCH<<REPLACE\nnew\n/);
+			assert.equal(logWrite.attributes.path, "edit_me.md");
+			assert.equal(logWrite.attributes.external, true);
+			assert.equal(logWrite.attributes.patch, "udiff-stub");
+		});
+
+		it("removed file: writes a log://*/<turn>/*/rm entry before the actual rm", async () => {
+			const store = mockStore();
+			await store.set({
+				runId: 1,
+				turn: 0,
+				path: "going.md",
+				body: "bye",
+				state: "resolved",
+				visibility: "archived",
+				hash: "abc",
+				writer: "plugin",
+			});
+
+			const scanner = new FileScanner(store, mockDb(), mockHooks());
+			await scanner.scan(tmpDir, 1, [], 5);
+
+			const rmLog = store.writes.find(
+				(w) =>
+					w.op === "set" &&
+					typeof w.path === "string" &&
+					/^log:\/\/\d+\/5\/\d+\/rm$/.test(w.path),
+			);
+			assert.ok(rmLog, "log://.../rm entry written");
+			assert.equal(rmLog.body, "");
+			assert.equal(rmLog.attributes.path, "going.md");
+			assert.equal(rmLog.attributes.external, true);
+
+			const rmCall = store.writes.find((w) => w.op === "rm");
+			assert.ok(rmCall, "actual entry removal still fires");
+			assert.equal(rmCall.path, "going.md");
+
+			// Order: log entry written before the rm call.
+			const logIdx = store.writes.indexOf(rmLog);
+			const rmIdx = store.writes.indexOf(rmCall);
+			assert.ok(
+				logIdx < rmIdx,
+				"engine-injected <rm> log lands before the entry removal",
+			);
+		});
+
+		it("skips log injection when no active loop (run hasn't dispatched)", async () => {
+			writeFileSync(join(tmpDir, "early.md"), "hi");
+			const store = mockStore();
+			const db = mockDb([{ id: 1 }], [], null);
+			const scanner = new FileScanner(store, db, mockHooks());
+
+			await scanner.scan(tmpDir, 1, ["early.md"], 0);
+
+			const logWrites = store.writes.filter(
+				(w) =>
+					w.op === "set" &&
+					typeof w.path === "string" &&
+					w.path.startsWith("log://"),
+			);
+			assert.equal(
+				logWrites.length,
+				0,
+				"no log injection without an active loop",
+			);
+			// File entry still lands.
+			assert.ok(store.entries.has("1:early.md"));
+		});
 	});
 });

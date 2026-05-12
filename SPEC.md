@@ -14,9 +14,9 @@ export default class RummyRepo {
     constructor(core) {
         this.#core = core;
         core.on("turn.started", this.#onTurnStarted.bind(this));
-        core.hooks.tools.onView("file", fn, "summarized");
-        core.hooks.tools.onView("repo", fn, "visible");
-        core.hooks.tools.onView("repo", fn, "summarized");
+        core.registerScheme({ name: "repo", category: "data", writableBy: ["plugin"] });
+        core.hooks.tools.onView("file", fn);
+        core.hooks.tools.onView("repo", fn);
     }
 }
 ```
@@ -42,11 +42,16 @@ Fires every turn before context materialization. The plugin:
 4. Opens a ProjectContext to enumerate git-tracked files
 5. Runs `scanner.scan()` to sync file entries with inline symbol extraction
 
-### `core.hooks.tools.onView("file", fn, "summarized")`
+### `core.hooks.tools.onView("file", fn)`
 
-Registers a view for file entries at summarized visibility. When a file
-is summarized, the model sees its symbol tree (from `attributes.symbols`)
-instead of the full content. Returns empty string if no symbols exist.
+Registers the file-scheme projection rendered as a catalog tile in
+`<index>`. The view returns the symbol tree (from
+`attributes.symbols`) when extraction succeeded, empty string
+otherwise — `<index>` is a catalog, not a content dump; the model
+retrieves full file bodies via `<get>`, which bypasses this hook.
+Empty-tile-on-no-symbols is the budget-safety contract: falling
+through to the raw body would dump every unsymbolic file into
+`<index>` and blow the turn-1 budget.
 
 Handles both parsed and stringified attributes:
 
@@ -54,19 +59,21 @@ Handles both parsed and stringified attributes:
 (entry) => {
     const attrs = typeof entry.attributes === "string"
         ? JSON.parse(entry.attributes) : entry.attributes;
-    return attrs?.symbols || "";
+    return attrs?.symbols ?? "";
 }
 ```
 
-### `core.hooks.tools.onView("repo", fn, "visible" | "summarized")`
+### `core.hooks.tools.onView("repo", fn)`
 
-Registers projection views for the manifest entry at
-`log://turn_0/repo/manifest`. The first argument matches Rummy core's
-**action-segment dispatch** for log entries, not the URI scheme — see
-§6 for the full convention. Both visibility levels are pass-through
-(`(entry) => entry.body`); the manifest body is already model-ready
-prose. `summarized` is registered defensively so the manifest survives
-demotion without requiring a follow-up plugin change.
+Registers the repo-scheme projection for `repo://manifest`. The view
+returns empty string — the manifest tile renders envelope-only in
+`<index>`. The full inventory body is the compaction lifeline,
+retrieved via `<get path="repo://manifest"/>`, which reads
+`entry.body` directly and bypasses this hook. See §6.
+
+`repo` is a registered scheme (`category: "data"`, `writableBy:
+["plugin"]`), so model writes to `repo://` raise `PermissionError`
+and strike.
 
 ---
 
@@ -127,13 +134,13 @@ get a veto over a file git tracks.
 ### 3.3 Visibility
 
 Which projection of an already-stored entry does the model see
-this turn? `visible` / `summarized` / `archived`. Governs model
-attention and context-window cost only.
+this turn? `indexed` / `visible` / `summarized` / `archived`.
+Governs model attention and context-window cost only.
 
 Visibility is NOT access. NOT existence. NOT membership. An
-`archived` file is fully in the project, scannable, and retrievable
-on demand via `<get>`. Membership constraints (`ignore`) and
-visibility states (`archived`) are different mechanisms operating
+`indexed` or `archived` file is fully in the project, scannable,
+and retrievable on demand via `<get>`. Membership constraints
+(`ignore`) and visibility states are different mechanisms operating
 on different axes; do not collapse them.
 
 ---
@@ -141,20 +148,23 @@ on different axes; do not collapse them.
 ## 4. Visibility Model
 
 Visibility governs the model's attention only — orthogonal to
-membership (§3.1) and to access. An `archived` file is in the
-project and retrievable on demand; it simply isn't pre-loaded into
-the model's working context.
+membership (§3.1) and to access. An `indexed` or `archived` file is
+in the project and retrievable on demand; the visibility level
+controls how (or whether) it appears in the rendered context.
 
-Files default to `"archived"` on first scan regardless of constraint
-type. A 5000-file repo doesn't dump 400K tokens into context before any
-work happens. The model orients via the `log://turn_0/repo/manifest` entry
-(visible, written once per run) and promotes individual files to
-`"summarized"` or `"visible"` as needed.
+Files default to `"indexed"` on first scan regardless of constraint
+type. Each file becomes a symbol-bearing tile in `<index>` — compact
+catalog entries, not full bodies. A 5000-file repo renders a list of
+envelopes, not 400K tokens of source. The model orients via the
+`<index>` tiles plus the `repo://manifest` directory rollup (also
+`indexed`), and promotes individual files to `"summarized"` or
+`"visible"` as needed.
 
 | Visibility | What the model sees |
 |------------|-------------------|
 | `"visible"` | Full file content |
 | `"summarized"` | Symbol tree from `attributes.symbols` |
+| `"indexed"` | Catalog tile in `<index>` — symbols (file) or empty envelope (`repo://manifest`) |
 | `"archived"` | Nothing (retrievable via `<get>`) |
 
 The model controls promotion/demotion via `<set visibility="..."/>`.
@@ -214,26 +224,38 @@ are extracted inline during the scan.
 
 **Per-scan flow:**
 
-1. Load active runs and file constraints from the database
+1. Load active runs, file constraints, and the current loop from the
+   database
 2. Include non-`ignore`-constrained files not in the git file list
 3. Concurrently classify each member file (§5.3.1) and stat it; skip
    `ignore`-constrained files
 4. For each file with changed mtime: apply the per-classification
    read rules (§5.3.1)
 5. Skip if hash matches stored hash (mtime changed but content didn't)
-6. If file existed before with different content, generate a diff via
-   `hooks.hedberg.generatePatch` and write a `set://` entry
+6. If the run has prior file entries (not the bootstrap scan) and the
+   file body changed, synthesize an action-log entry at
+   `log://<L>/<T>/<S>/set` with body in the model's SEARCH/REPLACE
+   edit grammar (via `hooks.hedberg.generateSearchReplaceBody`).
+   `attributes.patch` carries the udiff for client renderers;
+   `attributes.external = true` flags engine authorship. See §5.3.2.
 7. Extract symbols inline via antlrmap (ctags fallback queued) — for
    regular text entries only; skipped for symlink, submodule, and
    binary entries
 8. Write to store via `store.set()` with `state: "resolved"`,
-   visibility (preserve prior entry's visibility, else `"archived"`),
-   classification attributes per §5.3.1, and `writer: "plugin"`
+   visibility (preserve prior entry's visibility, else `"indexed"`),
+   classification attributes per §5.3.1, `loopId` from the active
+   loop, and `writer: "plugin"`
 9. Batch ctags extraction for files antlrmap couldn't handle
-10. Remove entries for files deleted from disk via `store.rm()`
-11. On the first scan only, write `log://turn_0/repo/manifest` (turn 0,
-    visible). Skipped on subsequent scans within the same run so the
-    turn-0 prefix stays bit-identical for cache stability.
+10. For each entry whose file disappeared from disk, synthesize a
+    `log://<L>/<T>/<S>/rm` action-log entry (`attributes.external =
+    true`, empty body) and then remove the file entry via
+    `store.rm()`. See §5.3.2.
+11. Write `repo://manifest` (visibility `indexed`) with the current
+    file inventory. Refreshed every scan so files added or removed
+    mid-run become visible to the model on the next loop. Requires
+    an active loop; if no loop has dispatched yet, the manifest
+    write is deferred to the next scan and file entries carry the
+    freshest state in the meantime.
 
 **Constraint matching** uses `hooks.hedberg.match` for pattern-based
 constraints (glob, regex, etc.) rather than exact string equality.
@@ -304,75 +326,110 @@ shape is forward-compatible: a submodule entry already exists in
 the manifest (just with an error attribute), so promoting it later
 is a body/attribute swap, not a membership change.
 
+#### 5.3.2 External Mutation Injection
+
+The model is the authoritative writer of file content, but the
+filesystem is a shared surface — an operator's editor, a build
+script, or a sibling process can mutate files between turns. When
+the scanner detects a mutation that didn't come from the model, it
+synthesizes a log entry so the change appears in the model's own
+edit grammar instead of materializing as silent state drift.
+
+**Path shape.** `log://<L>/<T>/<S>/<action>` where `<action>` is
+`set` for create/modify and `rm` for delete. Sequence numbers (`<S>`)
+are issued by `store.logPath()`.
+
+**Body shape.**
+
+- `set`: SEARCH/REPLACE block via
+  `hooks.hedberg.generateSearchReplaceBody(before, after)`. For a
+  first-appearance file (no prior entry body), SEARCH is empty and
+  REPLACE carries the full content; for a modification, one
+  SEARCH/REPLACE pair per diff hunk.
+- `rm`: empty body.
+
+**Attributes.**
+
+- `path`: project-relative file path.
+- `external: true`: distinguishes engine-injected mutations from
+  model-authored ones.
+- `patch` (set only, optional): udiff string from
+  `hooks.hedberg.generatePatch`, for client renderers (e.g.
+  rummy.nvim) that prefer unified-diff display.
+
+**Bootstrap guard.** When the run has zero prior file entries
+(`existing.length === 0`), the entire scan is the project baseline,
+not a delta. Injecting one log entry per file would dump the whole
+project into `<log>` on turn 1. Bootstrap skips injection; file
+entries themselves carry the baseline state. Subsequent scans inject
+for real deltas.
+
+**Loop guard.** Log paths require a `loopId`. If the run hasn't
+dispatched its first turn yet (no active loop), injection is skipped.
+File entries still write — only the log surfacing is deferred.
+
+**Rendering ownership.** `set` and `rm` action-log entries are
+rendered by Rummy core's central entry renderer, not by this plugin.
+The plugin produces the body content; core wraps it in the standard
+recap envelope. This plugin registers no view hook for either action.
+
 ---
 
-## 6. log://turn_0/repo/manifest
+## 6. repo://manifest
 
-The model's orientation map. Written once per run at turn 0 with
-`visibility: "visible"`. Body has two sections joined by a markdown
-horizontal rule; the visibility apparatus selects which the model
-sees.
+The model's orientation map. A single entry at the plugin-owned
+`repo://` scheme (registered in §1), written by the scanner and
+refreshed every scan with `visibility: "indexed"`. The body is the
+comprehensive file inventory; the `<index>` tile renders empty
+(envelope-only) — the inventory is retrieved on demand via
+`<get path="repo://manifest"/>`, which bypasses the view hook and
+reads `entry.body` directly. This is the compaction lifeline when
+the indexed file-tile set itself overshoots ceiling.
 
-**Content:**
+**Body shape.** Canonical JSON-per-row. Rollup rows first (path ends
+with `/`), per-file rows after. One list, one format, no separator.
 
 ```
-* ./ - 2 files, 429 tokens
-* src/ - 2 files, 1557 tokens
-
----
-
-* package.json - 142 tokens
-* README.md - 287 tokens
-* src/index.js - 1024 tokens
-* src/utils.js - 533 tokens
+{"path":"./","tokens":429}
+{"path":"src/","tokens":1557}
+{"path":"package.json","tokens":142,"lines":18}
+{"path":"README.md","tokens":287,"lines":42}
+{"path":"src/index.js","tokens":1024,"lines":120}
+{"path":"src/utils.js","tokens":533,"lines":67}
 ```
 
-The first section is the **directory rollup**: one line per
-directory that contains files, sorted alphabetically, with file
-count and token sum. Files at the project root roll up under `./`.
+Rollup rows aggregate `tokens` per directory; root files roll up
+under `"./"`. Per-file rows carry `tokens` and `lines` (file body
+line count) so the model can plan partial reads —
+`<get path="src/index.js" lineFirst=… lineFinal=…/>` — without
+computing the denominator. `lines` is omitted on empty bodies
+(symlinks, binaries, error catch-all).
 
-The second section is the **comprehensive file list**: every file
-with its individual token cost, sorted alphabetically by path
-(locale-aware). Same shape as the per-file `* path - N tokens`
-lines used elsewhere — paste-amenable for the model copying paths
-into `<get>` / `<set>` calls.
+**Refresh semantics.** The manifest is rewritten on every scan with
+the current inventory. Files added or removed mid-run appear on the
+next scan's manifest. This is a deliberate departure from the
+pre-loopId design, where the manifest was a turn-0 snapshot held
+bit-identical for prefix-cache stability — under loop-scoped entries,
+the manifest's job is current orientation, not cache substrate.
 
-**Two projections:**
+**Loop requirement.** The manifest entry carries a `loopId` (schema
+`NOT NULL`). When the run hasn't dispatched its first loop yet, the
+scan skips the manifest write; file entries themselves carry the
+freshest state until the next scan inside an active loop.
 
-- `visible` returns the whole body (rollup + flat list) so the
-  model has both directory-level orientation and file-level
-  pasteability in one render.
-- `summarized` returns the rollup only — the part before the
-  `\n\n---\n\n` delimiter. Same rollup that opens the visible
-  projection, on its own.
+**Scheme ownership.** `repo` is registered at plugin construction as
+`category: "data"`, `writableBy: ["plugin"]`. Model writes to
+`repo://` raise `PermissionError` and strike — the manifest is
+engine-maintained orientation, not a model-editable surface.
 
-When the visible body would push the dispatch packet over ceiling,
-the budget plugin's standard demotion path flips the manifest to
-`summarized`. The model still sees the directory map and can
-recover the full list with `<get path="log://turn_0/repo/manifest"/>`
-or scope its query with `<get path="src/**" manifest/>`. No bespoke
-truncation; size adapts via the same FVSM mechanism as every other
-oversized entry.
-
-**Path shape and view dispatch.** The path is
-`log://turn_N/<action>/<slug>` — Rummy's standard log-entry shape, where
-`<action>` is the projection-dispatch key. Rummy core's
-`materializeContext` extracts the action segment from log paths and
-looks up views under that name rather than the literal `log` scheme,
-so the plugin registers `core.hooks.tools.onView("repo", …)` to match.
-We deliberately don't register a `repo://` scheme: it would compete
-with the bare-path `file` scheme and attract accidental file-entry
-writes. Every entry that reaches `materializeContext` must have a
-visibility map registered for its projection key — `view()` throws on
-missing keys — so `onView("repo", …)` is required for `visible` and
-registered for `summarized` too as a defensive pass-through.
-
-**Idempotence.** The manifest is written only if no entry already
-exists at `log://turn_0/repo/manifest`. Subsequent scans within the same run
-do not mutate it. This keeps the turn-0 prefix bit-identical for the
-run's lifetime so the prefix cache holds clean across every subsequent
-turn. A file added on turn 5 will appear in the per-file entries but
-will not be retroactively listed in the manifest.
+**View hook.** `core.hooks.tools.onView("repo", () => "")` — single
+projection returning empty string. The `<index>` tile shows only the
+envelope (path + token count); the body is reached only via explicit
+`<get>`. Rummy core's `materializeContext` also dispatches log
+entries by their action segment, so the same `repo` view name would
+catch any `log://<L>/<T>/<S>/repo` action entries — but this plugin
+doesn't synthesize any such entries (Phase 3 injections use `set` /
+`rm`, see §5.3.2), so the action-segment overlap is presently moot.
 
 ---
 
@@ -458,7 +515,7 @@ class AnotherClass L25
 ```
 src/
   rummy.repo.js        Plugin entry. View handlers, turn.started listener.
-  FileScanner.js       File sync, inline symbol extraction, diff gen, log://turn_0/repo/manifest.
+  FileScanner.js       File sync, inline symbol extraction, external-mutation log injection, repo://manifest.
   ProjectContext.js     Git-aware file enumeration. Caches by HEAD hash.
   GitProvider.js        CLI git first, isomorphic-git fallback. Lazy loaded.
   CtagsExtractor.js    Universal Ctags wrapper. Synchronous child process.
@@ -475,13 +532,17 @@ src/
 
 Tests use Node's built-in test runner (`node:test`) and assertion module
 (`node:assert/strict`). FileScanner tests use temp directories with mock
-store/db and verify inline symbol extraction, state/visibility values,
-constraint handling, `log://turn_0/repo/manifest` generation and idempotence
-across re-scans, and `writer` attribution. GitProvider and ProjectContext
-tests run against the real repo. Plugin tests verify the absence of any
-`repo` scheme registration, the file-scheme summarized view handler,
-guard clauses, and end-to-end scanning with symbol attachment via temp
-git repos created with isomorphic-git.
+store/db and verify inline symbol extraction, state/visibility values
+(default `indexed`), constraint handling, `repo://manifest` generation
+and refresh across re-scans, Phase 3 external-mutation log injection
+(`set` with SEARCH/REPLACE bodies and `rm` with empty bodies, both
+carrying `attributes.external = true`), bootstrap-skip semantics,
+loop-id guarding, and `writer` attribution. GitProvider and
+ProjectContext tests run against the real repo. Plugin tests verify
+presence of the `repo` scheme registration, the single-projection
+`file` and `repo` view handlers, guard clauses, and end-to-end
+scanning with symbol attachment via temp git repos created with
+isomorphic-git.
 
 **Architecture regression tests** (`src/architecture.test.js`) assert
 the membership-axis rules from §3.1 as positive structural

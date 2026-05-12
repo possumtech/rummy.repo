@@ -16,30 +16,21 @@ function mockCore(dbOverride = null) {
 			hedberg: { match: (pattern, str) => pattern === str },
 			tools: {
 				views: [],
-				onView(scheme, fn, visibility) {
-					this.views.push({ scheme, fn, visibility });
+				onView(scheme, fn) {
+					this.views.push({ scheme, fn });
 				},
-				// Mirrors ToolRegistry.view (rummy core src/hooks/ToolRegistry.js):
-				// throw when no scheme registered; "" when scheme registered but
-				// the requested visibility isn't; normalize null/undefined to "".
+				// Mirrors ToolRegistry.view: single projection per scheme.
+				// Returns "" when no view registered. Plugins return raw
+				// body; line-numbering happens in materializeContext.
 				async view(scheme, entry) {
-					const matches = this.views.filter((v) => v.scheme === scheme);
-					if (matches.length === 0) {
-						throw new Error(`No view registered for scheme '${scheme}'.`);
-					}
-					const visibility = entry.visibility ?? "visible";
-					const match = matches.find((v) => v.visibility === visibility);
+					const match = this.views.find((v) => v.scheme === scheme);
 					if (!match) return "";
 					const result = await match.fn(entry);
 					return result == null ? "" : result;
 				},
 			},
 		},
-		registerScheme() {
-			// No-op for plugin-level tests; real PluginContext records to
-			// internal schemes array. Mock just exposes the entry point so
-			// the constructor doesn't throw.
-		},
+		registerScheme() {},
 		on(event, fn) {
 			if (!listeners.has(event)) listeners.set(event, []);
 			listeners.get(event).push(fn);
@@ -110,52 +101,51 @@ function mockDb() {
 		get_active_runs: { all: async () => [{ id: 1 }] },
 		get_file_constraints: { all: async () => [] },
 		get_entry_state: { get: async () => null },
+		// FileScanner requires an active loop for the manifest write.
+		// Tests that exercise scan must provide one.
+		get_current_loop: { get: async () => ({ id: 42 }) },
 	};
 }
 
 describe("RummyRepo", () => {
-	it("does not register a repo scheme (project state lives at log://turn_0/repo/manifest)", () => {
+	it("registers a repo scheme so project state can live at repo://manifest", () => {
 		const schemes = [];
 		const core = mockCore();
 		core.registerScheme = (s) => schemes.push(s);
 		new RummyRepo(core);
-		assert.ok(!schemes.some((s) => s.name === "repo"));
+		assert.ok(schemes.some((s) => s.name === "repo"));
 	});
 
-	it("registers a summarized view for the file scheme", () => {
+	it("registers a view for the file scheme: symbols if present, else empty (envelope-only)", () => {
 		const core = mockCore();
 		new RummyRepo(core);
-		const view = core.hooks.tools.views.find(
-			(v) => v.scheme === "file" && v.visibility === "summarized",
-		);
+		const view = core.hooks.tools.views.find((v) => v.scheme === "file");
 		assert.ok(view);
-		assert.equal(view.fn({ attributes: { symbols: "sym" } }), "sym");
-		assert.equal(view.fn({ attributes: '{"symbols":"parsed"}' }), "parsed");
-		assert.equal(view.fn({ attributes: {} }), "");
+		// With symbols: render the symbol projection (compact code outline).
+		assert.equal(
+			view.fn({ attributes: { symbols: "sym" }, body: "raw" }),
+			"sym",
+		);
+		assert.equal(
+			view.fn({ attributes: '{"symbols":"parsed"}', body: "raw" }),
+			"parsed",
+		);
+		// No symbols: empty tile. <index> is a catalog; model `<get>`s for
+		// the full body. Falling through to raw body would dump every
+		// unsymbolic file into <index> and blow the budget on turn 1.
+		assert.equal(view.fn({ attributes: {}, body: "raw" }), "");
+		assert.equal(view.fn({ attributes: null, body: "raw" }), "");
 	});
 
-	it("dispatches log://turn_N/repo/... — visible returns whole body, summarized returns rollup only", async () => {
+	it("repo view returns empty string — repo://manifest renders envelope-only in <index>", async () => {
 		const core = mockCore();
 		new RummyRepo(core);
 
-		// materializeContext extracts "repo" as the projection key from
-		// `log://turn_N/repo/...` paths and looks up views under that
-		// name (not the literal `log` scheme). Manifest body has two
-		// sections joined by `\n\n---\n\n`: directory rollup (summarized
-		// returns this), then comprehensive flat list (visible returns
-		// whole body).
-		const rollup = "* ./ - 2 files, 429 tokens";
-		const flat = "* app.js - 142 tokens\n* README.md - 287 tokens";
-		const body = `${rollup}\n\n---\n\n${flat}`;
-
-		assert.equal(
-			await core.hooks.tools.view("repo", { body, visibility: "visible" }),
-			body,
-		);
-		assert.equal(
-			await core.hooks.tools.view("repo", { body, visibility: "summarized" }),
-			rollup,
-		);
+		// `repo://manifest` tile renders empty body in `<index>` (envelope
+		// only). The full inventory body is the compaction lifeline,
+		// retrieved via `<get path="repo://manifest"/>` which reads
+		// entry.body directly and bypasses this view hook.
+		assert.equal(await core.hooks.tools.view("repo", { body: "any-body" }), "");
 	});
 
 	it("registers turn.started listener on construction", () => {
