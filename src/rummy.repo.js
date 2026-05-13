@@ -36,6 +36,17 @@ export default class RummyRepo {
 		// retrieved via `<get repo://manifest>` which reads entry.body
 		// directly and bypasses this view hook.
 		core.hooks.tools.onView("repo", () => "");
+
+		// Mimetype-keyed view hooks: any entry tagged with these content
+		// types flows through rummy.repo's handler regardless of scheme
+		// (`known://`, `unknown://`, `https://`, bare-file paths,
+		// `repo://manifest` rows — all of them). First-wins over the
+		// scheme handler per rummy core SPEC #mimetype dispatch
+		// precedence. The handler bodies are envelope-only today —
+		// future enrichments (markdown TOC, JSON schema summary) attach
+		// here without touching dispatch.
+		core.hooks.tools.onViewByMimetype("text/markdown", () => "");
+		core.hooks.tools.onViewByMimetype("application/json", () => "");
 	}
 
 	async #onTurnStarted({ rummy }) {

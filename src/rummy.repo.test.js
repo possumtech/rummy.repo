@@ -16,14 +16,32 @@ function mockCore(dbOverride = null) {
 			hedberg: { match: (pattern, str) => pattern === str },
 			tools: {
 				views: [],
+				mimetypeViews: [],
 				onView(scheme, fn) {
 					this.views.push({ scheme, fn });
 				},
-				// Mirrors ToolRegistry.view: single projection per scheme.
-				// Returns "" when no view registered. Plugins return raw
-				// body; line-numbering happens in materializeContext.
+				// Mirrors ToolRegistry.onViewByMimetype — content-keyed
+				// view; preempts scheme view when entry.attributes.mimetype
+				// matches a registered handler. Plugins use this to
+				// project across schemes by content type.
+				onViewByMimetype(mimetype, fn) {
+					this.mimetypeViews.push({ mimetype, fn });
+				},
+				// Mirrors ToolRegistry.view: mimetype-keyed first, scheme
+				// fallback. Returns "" when no view registered. Plugins
+				// return raw body; line-numbering happens in
+				// materializeContext.
 				async view(scheme, entry) {
-					const match = this.views.find((v) => v.scheme === scheme);
+					const attrs =
+						typeof entry?.attributes === "string"
+							? JSON.parse(entry.attributes)
+							: entry?.attributes;
+					const mimetype = attrs?.mimetype;
+					const mtMatch = mimetype
+						? this.mimetypeViews.find((v) => v.mimetype === mimetype)
+						: null;
+					const match =
+						mtMatch ?? this.views.find((v) => v.scheme === scheme);
 					if (!match) return "";
 					const result = await match.fn(entry);
 					return result == null ? "" : result;

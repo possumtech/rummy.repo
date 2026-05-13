@@ -114,7 +114,7 @@ constraints has zero members; this is correct behavior. The fix for
 "my non-git project should be scannable" is to declare `add`
 constraints, never to introduce a filesystem walk.
 
-A regression test (§11) asserts these rules by static source
+A regression test (§12) asserts these rules by static source
 inspection, specifically to catch downstream attempts to reintroduce
 repo-style schemes through narrow-looking patches.
 
@@ -235,7 +235,7 @@ are extracted inline during the scan.
 6. If the run has prior file entries (not the bootstrap scan) and the
    file body changed, synthesize an action-log entry at
    `log://<L>/<T>/<S>/set` with body in the model's SEARCH/REPLACE
-   edit grammar (via `hooks.hedberg.generateSearchReplaceBody`).
+   edit grammar (via `hooks.hedberg.renderModel`).
    `attributes.patch` carries the udiff for client renderers;
    `attributes.external = true` flags engine authorship. See §5.3.2.
 7. Extract symbols inline via antlrmap (ctags fallback queued) — for
@@ -243,7 +243,8 @@ are extracted inline during the scan.
    binary entries
 8. Write to store via `store.set()` with `state: "resolved"`,
    visibility (preserve prior entry's visibility, else `"indexed"`),
-   classification attributes per §5.3.1, `loopId` from the active
+   classification attributes per §5.3.1, `mimetype` from
+   `mimetypeFromPath(relPath)` (see §7), `loopId` from the active
    loop, and `writer: "plugin"`
 9. Batch ctags extraction for files antlrmap couldn't handle
 10. For each entry whose file disappeared from disk, synthesize a
@@ -342,10 +343,10 @@ are issued by `store.logPath()`.
 **Body shape.**
 
 - `set`: SEARCH/REPLACE block via
-  `hooks.hedberg.generateSearchReplaceBody(before, after)`. For a
-  first-appearance file (no prior entry body), SEARCH is empty and
-  REPLACE carries the full content; for a modification, one
-  SEARCH/REPLACE pair per diff hunk.
+  `hooks.hedberg.renderModel(before, after)`. For a first-appearance
+  file (no prior entry body), SEARCH is empty and REPLACE carries
+  the full content; for a modification, one SEARCH/REPLACE pair per
+  diff hunk.
 - `rm`: empty body.
 
 **Attributes.**
@@ -354,8 +355,8 @@ are issued by `store.logPath()`.
 - `external: true`: distinguishes engine-injected mutations from
   model-authored ones.
 - `patch` (set only, optional): udiff string from
-  `hooks.hedberg.generatePatch`, for client renderers (e.g.
-  rummy.nvim) that prefer unified-diff display.
+  `hooks.hedberg.renderClient(relPath, before, after)`, for client
+  renderers (e.g. rummy.nvim) that prefer unified-diff display.
 
 **Bootstrap guard.** When the run has zero prior file entries
 (`existing.length === 0`), the entire scan is the project baseline,
@@ -392,18 +393,24 @@ with `/`), per-file rows after. One list, one format, no separator.
 ```
 {"path":"./","tokens":429}
 {"path":"src/","tokens":1557}
-{"path":"package.json","tokens":142,"lines":18}
-{"path":"README.md","tokens":287,"lines":42}
-{"path":"src/index.js","tokens":1024,"lines":120}
-{"path":"src/utils.js","tokens":533,"lines":67}
+{"path":"package.json","tokens":142,"lines":18,"mimetype":"application/json"}
+{"path":"README.md","tokens":287,"lines":42,"mimetype":"text/markdown"}
+{"path":"src/index.js","tokens":1024,"lines":120,"mimetype":"text/javascript"}
+{"path":"src/utils.js","tokens":533,"lines":67,"mimetype":"text/javascript"}
+{"path":"docs/diagram.png","tokens":0,"mimetype":"image/png"}
 ```
 
 Rollup rows aggregate `tokens` per directory; root files roll up
-under `"./"`. Per-file rows carry `tokens` and `lines` (file body
-line count) so the model can plan partial reads —
+under `"./"`. Per-file rows carry `tokens`, `lines`, and `mimetype`
+so the model can plan partial reads —
 `<get path="src/index.js" lineFirst=… lineFinal=…/>` — without
-computing the denominator. `lines` is omitted on empty bodies
-(symlinks, binaries, error catch-all).
+computing the denominator and without guessing the content shape.
+`lines` is omitted on empty bodies (symlinks, error catch-all);
+binary entries show `tokens: 0` and the binary `mimetype` (`<get>`
+on them returns soft `405` per the rummy core mimetype contract).
+`mimetype` resolution follows the rummy SPEC's precedence: explicit
+attribute → extension → engine default `text/markdown` (see rummy
+SPEC `#mimetype`).
 
 **Refresh semantics.** The manifest is rewritten on every scan with
 the current inventory. Files added or removed mid-run appear on the
@@ -433,19 +440,80 @@ doesn't synthesize any such entries (Phase 3 injections use `set` /
 
 ---
 
-## 7. Symbol Extraction
+## 7. Mimetype Enrichment
+
+rummy.repo is the canonical reader of the `mimetype` attribute
+(rummy core SPEC `#mimetype`). The core engine guarantees the floor —
+textual `<get>` returns numbered lines, binary `<get>` returns soft
+`405` — without this plugin installed. rummy.repo's role is *value
+on top*: content-aware projections that the model can't get from
+the raw body alone.
+
+**Precedence.** When rummy.repo resolves an entry's mimetype, it
+consults sources in this order, taking the first non-null:
+
+1. **Explicit attribute.** `entry.attributes.mimetype` if set by a
+   fetcher (rummy.web's Content-Type write) or by an explicit
+   model `<set>` tagging.
+2. **Extension lookup.** For paths with a recognizable suffix:
+   `.md` → `text/markdown`, `.json` → `application/json`,
+   `.js`/`.ts` → `text/javascript`/`text/typescript`,
+   `.png`/`.jpg`/`.pdf` → corresponding binary types, etc.
+3. **Engine default.** `text/markdown` (rummy core's universal
+   fallback).
+
+The HTTP Content-Type response header is *not* consulted directly
+by rummy.repo — that's the fetcher's job (rummy.web writes it onto
+the attribute at fetch time). By the time rummy.repo reads
+mimetype, it's either explicit (caller tagged it) or unset (caller
+fell through to extension/default).
+
+**Dispatch.** rummy.repo registers handlers via
+`core.hooks.tools.onViewByMimetype(mimetype, fn)` (rummy core
+SPEC `#mimetype` — "Dispatch precedence"). The engine consults
+mimetype handlers first when resolving an entry's view; the
+scheme handler is the fallback. This is what makes the
+"scheme-agnostic" promise structural rather than aspirational —
+the dispatch infrastructure picks rummy.repo's `text/markdown`
+handler whether the entry lives at `known://`, `unknown://`,
+`https://wiki/page`, or `docs/notes.md`.
+
+**Enrichment menu.** rummy.repo selects projections by resolved
+mimetype, scheme-agnostic. Any entry tagged with one of these
+mimetypes flows through the same handler regardless of where it
+lives — `repo://manifest` rows, bare-file tiles, `known://`,
+`unknown://`, fetched `https://` entries, etc. Scheme is *where*
+the entry lives; mimetype is *what's in it*.
+
+| Mimetype | Index-tile enrichment |
+|---|---|
+| `text/markdown` | (planned) heading TOC summary — section anchors visible without fetching the body. Applies to any entry tagged `text/markdown`, regardless of scheme. |
+| `application/json` | (planned) top-level key schema summary. |
+| `text/javascript` / `text/typescript` / sibling code types | Symbol extraction (see §8) — function/class/exported-binding summaries. |
+| Other textual mimetypes | Engine floor only (path + token count + line count). |
+| Binary mimetypes | Tile carries the mimetype; no body, no enrichment. |
+
+Enrichments are additive — they expand what the model sees in the
+`<index>` tile without changing what `<get>` returns. The engine
+floor stays the same with or without rummy.repo installed: textual
+`<get>` returns numbered lines, binary `<get>` returns soft `405`.
+Uninstalling rummy.repo only removes the enrichments.
+
+---
+
+## 8. Symbol Extraction
 
 Symbols are extracted inline during the file scan. Each file write
 carries its `attributes.symbols` if extraction succeeded.
 
-### 7.1 Antlrmap (Primary)
+### 8.1 Antlrmap (Primary)
 
 A single `Antlrmap` instance is created when the FileScanner is
 constructed and reused across all scans. For each changed file with a
 supported extension, `antlrmap.mapSource(content, ext)` is called. If
 symbols are returned, they are formatted and attached to the write.
 
-### 7.2 Ctags (Fallback)
+### 8.2 Ctags (Fallback)
 
 Files where antlrmap returns no symbols or has no grammar are queued
 for a single batched `ctags --output-format=json --fields=+nS`
@@ -457,7 +525,7 @@ invocation. Results are written back as attribute-only updates via
 
 ---
 
-## 8. Symbol Data Structure
+## 9. Symbol Data Structure
 
 Antlrmap symbols:
 
@@ -483,34 +551,90 @@ Ctags symbols:
 }
 ```
 
+`formatSymbols` reads both fields (`kind ?? type`), so the documented
+data shapes are preserved while rendering is uniform across sources.
+
+**Kind set is open-ended.** Antlrmap promises the six kinds above;
+ctags emits whatever Universal Ctags reports for a given language
+(`struct`, `trait`, `namespace`, `typedef`, `macro`, `generator`,
+`variable`, `property`, `constant`, `member`, `enumerator`, and more
+across the long tail of supported languages). `formatSymbols` does
+not enumerate kinds — it sorts them into three rendering buckets
+(Kind-to-wrapper categorization, below) with a bare fallback for anything unrecognized. Adding a new
+language never requires a code change here.
+
 ---
 
-## 9. formatSymbols
+## 10. formatSymbols
 
-Converts symbol arrays to indented text trees.
+Converts symbol arrays into a `<symbols>`-wrapped flat list. Each row
+is self-contained: line number, a tab, then the symbol's full
+ancestor chain joined by ` » ` (U+00BB).
+
+### Row shape
+
+```
+<line>:\t<ancestor> » <ancestor> » <self>
+```
+
+- Leading column is the symbol's `line` followed by `:`. When the
+  source didn't provide a line number, the column is empty (just
+  `:`) — the tab separator stays, so the row remains grep-parseable.
+- The chain is the stack of open parents (each rendered as its own
+  wrapped form) plus the symbol itself.
+- A symbol with no parents is just `<line>:\t<self>`.
+
+### Kind-to-wrapper categorization
+
+Three buckets cover the kinds antlrmap and ctags emit in practice;
+anything outside the buckets renders bare.
+
+| Wrapper | Bucket | Kinds in this bucket |
+|---------|--------|----------------------|
+| `{X}` | container / type | `class`, `interface`, `enum`, `struct`, `trait`, `namespace`, `module`, `typedef` |
+| `[X(params)]` | callable | `function`, `method`, `constructor`, `generator`, `macro` |
+| `X` (bare) | data / member or unknown | `field`, `variable`, `property`, `constant`, `member`, `enumerator`, and any kind not listed above |
+
+Params (if present) render inside the callable wrapper. Array params
+join with `, ` and are wrapped in parens. String params (from ctags,
+which already include their own parens) render verbatim. Containers
+and bare-rendered kinds omit params even when present.
 
 ### Algorithm
 
-1. Sort symbols by `line` (ascending, `0` for missing)
-2. Maintain a stack of "open" parent symbols (those with `endLine`)
+1. Sort symbols by `line` (ascending, `0` for missing).
+2. Maintain a stack of "open" parent symbols (those with `endLine`).
 3. For each symbol:
-   - Pop parents whose `endLine` has been passed
-   - Indent by stack depth (2 spaces per level)
-   - Format as `{indent}{kind} {name}({params}) L{line}`
-   - Push onto stack if it has a valid `endLine` range
+   - Pop parents whose `endLine` has been passed.
+   - Build the ancestor chain by wrapping each open parent via the
+     categorization above.
+   - Wrap the symbol itself the same way.
+   - Emit `<line>:\t<chain>`, joining ancestors and self with ` » `.
+   - Push onto stack if it has a valid `endLine` range.
 
 ### Output
 
 ```
-class MyClass L1
-  method doThing(a, b) L5
-  field name L3
-class AnotherClass L25
+<symbols>
+1:	{Foo}
+5:	{Foo} » [doThing(a, b)]
+8:	{Foo} » name
+9:	{AnotherClass}
+12:	[topLevelFn(x)]
+15:	CONFIG_FLAG
+</symbols>
 ```
+
+### Empty input
+
+`formatSymbols([])` returns `""` (not the wrapper). Callers writing
+the `symbols` attribute on a file entry can pass the result through
+directly — an unsymbolic file gets an empty `attributes.symbols`,
+and the file-scheme view hook (§2) renders an envelope-only tile.
 
 ---
 
-## 10. Module Structure
+## 11. Module Structure
 
 ```
 src/
@@ -524,7 +648,7 @@ src/
 
 ---
 
-## 11. Testing
+## 12. Testing
 
 | Tier | Location | Coverage |
 |------|----------|----------|

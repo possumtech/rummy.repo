@@ -95,8 +95,8 @@ function mockHooks() {
 	return {
 		hedberg: {
 			match: (pattern, str) => pattern === str,
-			generatePatch: () => "udiff-stub",
-			generateSearchReplaceBody: (before, after) => {
+			renderClient: () => "udiff-stub",
+			renderModel: (before, after) => {
 				if (before === after) return "";
 				if (before === "") {
 					return `<<SEARCH\nSEARCH<<REPLACE\n${after}\nREPLACE`;
@@ -197,6 +197,41 @@ describe("FileScanner", () => {
 		assert.equal(store.entries.get("1:main.js").visibility, "indexed");
 	});
 
+	it("writes mimetype attribute on file entries (extension-resolved per §7)", async () => {
+		writeFileSync(join(tmpDir, "code.js"), "const x = 1;");
+		writeFileSync(join(tmpDir, "doc.md"), "# hi");
+		writeFileSync(join(tmpDir, "data.json"), "{}");
+		writeFileSync(join(tmpDir, "Makefile"), "all:\n\techo hi\n");
+		const store = mockStore();
+		const scanner = new FileScanner(store, mockDb(), mockHooks());
+
+		await scanner.scan(
+			tmpDir,
+			1,
+			["code.js", "doc.md", "data.json", "Makefile"],
+			1,
+		);
+
+		assert.equal(
+			store.entries.get("1:code.js").attributes.mimetype,
+			"text/javascript",
+		);
+		assert.equal(
+			store.entries.get("1:doc.md").attributes.mimetype,
+			"text/markdown",
+		);
+		assert.equal(
+			store.entries.get("1:data.json").attributes.mimetype,
+			"application/json",
+		);
+		// No-extension paths fall through to the engine default per §7
+		// precedence (explicit attr → extension → text/markdown).
+		assert.equal(
+			store.entries.get("1:Makefile").attributes.mimetype,
+			"text/markdown",
+		);
+	});
+
 	it("writes repo://manifest with directory rollup + flat file list", async () => {
 		writeFileSync(join(tmpDir, "app.js"), "const x = 1;");
 		writeFileSync(join(tmpDir, "README.md"), "# hi");
@@ -226,10 +261,15 @@ describe("FileScanner", () => {
 		assert.deepEqual({ path: JSON.parse(lines[1]).path }, { path: "src/" });
 		assert.equal(typeof JSON.parse(lines[1]).tokens, "number");
 
-		// Flat list: one JSON row per file, alphabetical by path.
+		// Flat list: one JSON row per file, alphabetical by path. Each
+		// row carries `mimetype` (§7 enrichment) for content-shape
+		// planning by the model.
 		assert.equal(JSON.parse(lines[2]).path, "app.js");
+		assert.equal(JSON.parse(lines[2]).mimetype, "text/javascript");
 		assert.equal(JSON.parse(lines[3]).path, "README.md");
+		assert.equal(JSON.parse(lines[3]).mimetype, "text/markdown");
 		assert.equal(JSON.parse(lines[4]).path, "src/index.js");
+		assert.equal(JSON.parse(lines[4]).mimetype, "text/javascript");
 
 		// No category headers, no constraints, no navigate, no absolute path.
 		assert.ok(!manifest.body.includes("##"));

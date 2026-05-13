@@ -5,6 +5,7 @@ import { extname, join } from "node:path";
 import Antlrmap from "@possumtech/antlrmap";
 import CtagsExtractor from "./CtagsExtractor.js";
 import formatSymbols from "./formatSymbols.js";
+import { mimetypeFromPath } from "./mimetype.js";
 
 const antlrmapSupported = new Set(Object.keys(Antlrmap.extensions));
 
@@ -137,18 +138,15 @@ export default class FileScanner {
 			// shape) for the log body. attrs.patch carries the udiff
 			// for client renderers (rummy.nvim). attrs.external=true
 			// distinguishes engine injection from model authorship.
-			// Fires for both first-appearance (empty SEARCH, full
-			// REPLACE) and modification (one S/R pair per diff hunk).
+			// Fires for both first-appearance (empty old → full insert
+			// hunk) and modification (one hunk per diff hunk).
 			if (
 				!isBootstrap &&
 				loopId !== null &&
-				this.#hooks?.hedberg?.generateSearchReplaceBody
+				this.#hooks?.hedberg?.renderModel
 			) {
 				const before = entry?.body ?? "";
-				const body = this.#hooks.hedberg.generateSearchReplaceBody(
-					before,
-					content,
-				);
+				const body = this.#hooks.hedberg.renderModel(before, content);
 				if (body) {
 					const logPath = await this.#store.logPath(
 						runId,
@@ -156,8 +154,8 @@ export default class FileScanner {
 						currentTurn,
 						"set",
 					);
-					const patch = this.#hooks.hedberg.generatePatch
-						? this.#hooks.hedberg.generatePatch(relPath, before, content)
+					const patch = this.#hooks.hedberg.renderClient
+						? this.#hooks.hedberg.renderClient(relPath, before, content)
 						: null;
 					await this.#store.set({
 						runId,
@@ -193,6 +191,7 @@ export default class FileScanner {
 			const attributes = {
 				constraint,
 				updatedAt: new Date(mtime).toISOString(),
+				mimetype: mimetypeFromPath(relPath),
 			};
 			const symbols = await this.#extractAntlrSymbols(relPath, content);
 			if (symbols != null) {
@@ -333,9 +332,11 @@ export function buildManifestBody(files) {
 		.map(([path, { tokens }]) => JSON.stringify({ path, tokens }));
 	const flat = files.map((f) => {
 		const lines = countLines(f.body);
-		return lines
-			? JSON.stringify({ path: f.path, tokens: f.tokens, lines })
-			: JSON.stringify({ path: f.path, tokens: f.tokens });
+		const mimetype = mimetypeFromPath(f.path);
+		const row = { path: f.path, tokens: f.tokens };
+		if (lines) row.lines = lines;
+		row.mimetype = mimetype;
+		return JSON.stringify(row);
 	});
 	return [...rollup, ...flat].join("\n");
 }
